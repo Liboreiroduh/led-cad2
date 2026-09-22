@@ -36,6 +36,7 @@ export const zaiProvider: AiProvider = {
       input.userRequest,
       input.attachments,
       input.validationFeedback,
+      input.fewShot,
     );
 
     try {

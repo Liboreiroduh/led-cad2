@@ -46,12 +46,21 @@ export function buildUserPrompt(
   userRequest: string,
   attachments: AiAttachment[],
   validationFeedback?: string,
+  fewShot?: { id: string; request: string; before: string; after: string } | null,
 ): string {
   const parts: string[] = [];
   parts.push(`PROJECT ATUAL:\n${currentProjectJson}`);
   if (attachments.length) {
     parts.push(
       `ANEXOS: ${attachments.length} imagem(ns). Use-as como referência geométrica; medidas inferidas visualmente viram assumptions com review_required.`,
+    );
+  }
+  if (fewShot) {
+    parts.push(
+      `EXEMPLO DE REFERÊNCIA (few-shot salvo pelo operador — imite o FORMATO e o nível de detalhe, NÃO copie a geometria):\n` +
+        `PEDIDO ORIGINAL: ${fewShot.request}\n` +
+        `DOCUMENTO ANTES:\n${fewShot.before}\n` +
+        `DOCUMENTO DEPOIS (formato esperado da resposta):\n${fewShot.after}`,
     );
   }
   parts.push(`PEDIDO DO USUÁRIO:\n${userRequest}`);

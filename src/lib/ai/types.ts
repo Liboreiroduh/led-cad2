@@ -19,6 +19,8 @@ export interface AiCallInput {
   apiKey?: string;
   /** feedback de validação para o retry único */
   validationFeedback?: string;
+  /** Exemplo few-shot (§25): par pedido→documento esperado salvo pelo operador. */
+  fewShot?: { id: string; request: string; before: string; after: string } | null;
 }
 
 export interface AiCallResult {

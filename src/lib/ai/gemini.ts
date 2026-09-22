@@ -38,6 +38,7 @@ export const geminiProvider: AiProvider = {
       input.userRequest,
       input.attachments,
       input.validationFeedback,
+      input.fewShot,
     );
 
     const parts: GeminiPart[] = [{ text: userPrompt }];

@@ -3,6 +3,7 @@
  * Sem preço no MVP.
  */
 import type { ProjectDocument } from "./schema";
+import type { CadElement } from "./schema";
 import { getProfile, cableKgPerMeter, STEEL_DENSITY_KG_M3 } from "./profiles";
 
 export interface BomRow {
@@ -140,4 +141,27 @@ export function bomToCsv(bom: Bom): string {
   );
   lines.push(`;;;;TOTAL;${bom.total_weight_kg}`);
   return [header, ...lines].join("\n");
+}
+
+/**
+ * Peso individual estimado de um elemento (kg) — mesma matemática do BOM.
+ * Retorna null quando o tipo não tem peso de aço (panel/bolt/surface).
+ * Função pura, segura para import no cliente.
+ */
+export function estimateElementWeightKg(el: CadElement): number | null {
+  if (el.type === "beam") {
+    const prof = getProfile(el.profile);
+    if (!prof) return null;
+    const len = Math.hypot(el.end.x - el.start.x, el.end.y - el.start.y, el.end.z - el.start.z);
+    return +(prof.kgm * (len / 1000)).toFixed(2);
+  }
+  if (el.type === "cable") {
+    const len = Math.hypot(el.end.x - el.start.x, el.end.y - el.start.y, el.end.z - el.start.z);
+    return +(cableKgPerMeter(el.diameter) * (len / 1000)).toFixed(2);
+  }
+  if (el.type === "plate") {
+    const m3 = (el.size_x * el.size_y * el.size_z) / 1e9;
+    return +(m3 * STEEL_DENSITY_KG_M3).toFixed(2);
+  }
+  return null;
 }

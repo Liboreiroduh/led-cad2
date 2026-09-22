@@ -13,7 +13,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   Send, Paperclip, Copy, CheckCircle2, AlertTriangle, Info, FileJson,
-  Save, Loader2, RotateCcw, Download, Upload, Braces, Sparkles, Trash2, Move, Replace, CopyPlus, ListTree, History,
+  Save, Loader2, RotateCcw, Download, Upload, Braces, Sparkles, Trash2, Move, Replace, CopyPlus, ListTree, History, GraduationCap, ImageOff,
 } from "lucide-react";
 import { api, ApiCallError } from "@/lib/cad/client-api";
 import type { Assumption, ProjectDocument, ProjectDiff } from "@/lib/cad/schema";
@@ -35,6 +35,8 @@ interface CopilotDockProps {
   onPreviewCandidate: (candidate: ProjectDocument) => Promise<{ ok: boolean; errors?: Array<{ path: string; message: string }>; warnings?: Array<{ path: string; message: string }>; diffSummary?: string }>;
   selectedElement: ProjectDocument["elements"][number] | null;
   activeProviderLabel: string;
+  /** modelo ativo aceita imagem? (false → avisa ao anexar croqui) */
+  activeVision?: boolean;
   onOpenProviders: () => void;
   onOpenJsonTab: () => void;
   onAppliedCandidate: () => void;
@@ -158,6 +160,10 @@ function CopilotTab(props: CopilotDockProps) {
             <p className="font-semibold text-slate-600 mb-1">A IA escreve o documento inteiro.</p>
             <p>Descreva a estrutura desejada. O sistema valida o JSON, calcula o diff e mostra o preview 3D antes de aplicar.</p>
             <p className="mt-2 text-slate-400">Ex.: “remova os postes e use sustentação de parede” · “adicione cabo de fixação por coluna” · “transforme o painel em 4x2”.</p>
+            <p className="mt-2 flex items-start gap-1.5 text-slate-400">
+              <GraduationCap className="h-3.5 w-3.5 mt-0.5 shrink-0 text-violet-500" />
+              Exemplos salvos com “salvar como exemplo” viram referência few-shot nas próximas transformações.
+            </p>
           </div>
         )}
         {props.history.map((h) => (
@@ -188,6 +194,18 @@ function CopilotTab(props: CopilotDockProps) {
       )}
 
       <div className="border-t border-slate-200 p-3 space-y-2">
+        {attachments.length > 0 && props.activeVision === false && (
+          <button
+            onClick={props.onOpenProviders}
+            className="w-full flex items-center gap-2 text-left text-[11px] bg-amber-50 border border-amber-300 text-amber-800 rounded-lg px-2.5 py-2 hover:bg-amber-100 transition-colors"
+            role="alert"
+          >
+            <ImageOff className="h-4 w-4 shrink-0 text-amber-600" />
+            <span className="min-w-0">
+              <span className="font-semibold">Modelo ativo não processa imagens.</span> O anexo será rejeitado — troque para um modelo vision (ex.: glm-4.5v).
+            </span>
+          </button>
+        )}
         {attachments.length > 0 && (
           <div className="flex gap-2">
             {attachments.map((a, i) => (
@@ -228,7 +246,8 @@ function CopilotTab(props: CopilotDockProps) {
           </Button>
         </div>
         <button onClick={props.onOpenProviders} className="w-full text-left text-[11px] text-slate-500 hover:text-orange-700 transition-colors truncate" title="Abrir conector de IA">
-          IA ativa: {props.activeProviderLabel} <span className="underline">trocar</span>
+          IA ativa: {props.activeProviderLabel}
+          {props.activeVision === false ? " · sem visão" : ""} <span className="underline">trocar</span>
         </button>
       </div>
     </>
@@ -300,8 +319,13 @@ function HistoryCard({ item, onSaveExample }: { item: HistoryItem; onSaveExample
           {m.status === "needs_input" ? "precisa de input" : "candidato pronto"}
         </span>
         {m.provider && (
-          <span className="text-[10px] text-slate-400">
+          <span className="text-[10px] text-slate-400 flex items-center gap-1">
             {m.provider} · {m.model} · {((m.latency ?? 0) / 1000).toFixed(1)}s
+            {!!m.fewShot && (
+              <span className="inline-flex items-center gap-0.5 rounded bg-violet-100 text-violet-700 border border-violet-200 px-1 font-semibold" title="usou exemplo few-shot salvo pelo operador">
+                <GraduationCap className="h-3 w-3" /> few-shot
+              </span>
+            )}
           </span>
         )}
       </div>

@@ -40,6 +40,34 @@ export interface TransformMeta {
   model: string;
   latency_ms: number;
   attempts: number;
+  /** id do exemplo few-shot usado (§25) — null quando nenhum aplicável */
+  few_shot_id: string | null;
+}
+
+/**
+ * Escolhe o exemplo few-shot mais recente que caiba no orçamento de tokens.
+ * Guard de economia (§16/§34): exemplo completo (antes+depois) ≤ ~220KB combinados
+ * e documento "antes" com até 120 elementos — acima disso o custo supera o ganho.
+ */
+const FEW_SHOT_MAX_ELEMENTS = 120;
+const FEW_SHOT_MAX_BYTES = 220_000;
+
+function pickFewShot(): { id: string; request: string; before: string; after: string } | null {
+  try {
+    const examples = getStore().listExamples();
+    for (const ex of examples) {
+      if (ex.before_elements <= 0 || ex.after_elements <= 0) continue;
+      if (ex.before_elements > FEW_SHOT_MAX_ELEMENTS) continue;
+      if (ex.size_bytes > FEW_SHOT_MAX_BYTES) continue;
+      const before = JSON.stringify(ex.before);
+      const after = JSON.stringify(ex.after);
+      if (!before || !after || before.length + after.length > FEW_SHOT_MAX_BYTES) continue;
+      return { id: ex.id, request: ex.request, before, after };
+    }
+  } catch {
+    // sem exemplos — segue sem few-shot
+  }
+  return null;
 }
 
 export interface TransformOutput {
@@ -107,12 +135,13 @@ export function listProviders() {
   return (Object.keys(REGISTRY) as ProviderId[]).map((id) => {
     const p = REGISTRY[id];
     const pcfg = id === "mock" ? null : cfg[id];
+    const activeModel = pcfg ? pcfg.model : p.defaultModels[0];
     return {
       id,
       label: p.label,
       default_models: p.defaultModels,
-      current_model: pcfg ? pcfg.model : p.defaultModels[0],
-      supports_image: true,
+      current_model: activeModel,
+      supports_image: p.supportsImage(activeModel),
       configured: id === "mock" ? true : id === "zai" ? true : Boolean(pcfg?.api_key),
       active: cfg.active_provider === id,
     };
@@ -147,6 +176,7 @@ export async function transformProject(input: {
   let attempts = 0;
   let lastError: Error & { details?: string; isEnvelope?: boolean; isSchema?: boolean } | null = null;
   const totalStart = Date.now();
+  const fewShot = pickFewShot();
 
   while (attempts < 2) {
     attempts++;
@@ -167,6 +197,7 @@ export async function transformProject(input: {
         timeoutMs: pcfg.timeout_ms,
         apiKey: pcfg.api_key,
         validationFeedback: feedback,
+        fewShot,
       });
       const raw = extractJson(result.text, providerId);
       const response = validateEnvelope(raw, providerId);
@@ -180,7 +211,7 @@ export async function transformProject(input: {
         candidate,
         candidate_hash,
         validation_warnings: warnings,
-        meta: { provider: providerId, model: result.model, latency_ms: Date.now() - totalStart, attempts },
+        meta: { provider: providerId, model: result.model, latency_ms: Date.now() - totalStart, attempts, few_shot_id: fewShot?.id ?? null },
       };
     } catch (e) {
       const err = e as Error & { details?: string; isEnvelope?: boolean; isSchema?: boolean };

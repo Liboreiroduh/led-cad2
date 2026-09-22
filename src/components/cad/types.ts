@@ -17,6 +17,7 @@ export interface HistoryItem {
     provider?: string;
     model?: string;
     latency?: number;
+    fewShot?: string | null;
     applied?: boolean;
     candidate?: ProjectDocument | null;
     baseRevision?: number;

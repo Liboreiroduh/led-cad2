@@ -13,7 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   FilePlus2, Upload, Undo2, FileSpreadsheet, FileDown, PlugZap, Loader2, X, Lock, RefreshCw,
-  Camera, Keyboard, Layers3, Ruler, Crosshair, GitCompare, MoveHorizontal,
+  Camera, Keyboard, Layers3, Ruler, Crosshair, GitCompare, MoveHorizontal, Weight,
 } from "lucide-react";
 import { toast } from "sonner";
 import Viewer3D from "@/components/cad/Viewer3D";
@@ -22,6 +22,7 @@ import { ProviderModal } from "@/components/cad/ProviderModal";
 import { BomDialog } from "@/components/cad/BomDialog";
 import { VIEW_LABELS, VIEWS, type StatusMap, type ViewMode } from "@/components/cad/sceneBuilder";
 import { api, ApiCallError, type ProjectState, type TransformResult, type PreviewResult } from "@/lib/cad/client-api";
+import { estimateElementWeightKg } from "@/lib/cad/bom";
 import type { ProjectDiff, ProjectDocument } from "@/lib/cad/schema";
 import type { HistoryItem } from "@/components/cad/types";
 
@@ -70,6 +71,7 @@ export default function Home() {
   const [providerModalOpen, setProviderModalOpen] = useState(false);
   const [bomOpen, setBomOpen] = useState(false);
   const [providerLabel, setProviderLabel] = useState("carregando…");
+  const [activeVision, setActiveVision] = useState(true);
   const [pdfBusy, setPdfBusy] = useState(false);
   const importFileRef = useRef<HTMLInputElement>(null);
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
@@ -85,6 +87,32 @@ export default function Home() {
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const [dockWidth, setDockWidth] = useState(DOCK_DEFAULT);
   const dockDragRef = useRef<{ startX: number; startW: number } | null>(null);
+  const dockWidthRef = useRef(dockWidth);
+
+  // arraste da alça de redimensionamento do dock (desktop)
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const drag = dockDragRef.current;
+      if (!drag) return;
+      const maxW = Math.min(DOCK_MAX, Math.max(DOCK_MIN, Math.floor(window.innerWidth * 0.6)));
+      const w = Math.min(maxW, Math.max(DOCK_MIN, drag.startW + (drag.startX - e.clientX)));
+      dockWidthRef.current = w; // sync imediato — efeito passivo pode atrasar em headless
+      setDockWidth(w);
+    };
+    const onUp = () => {
+      if (!dockDragRef.current) return;
+      dockDragRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      try { localStorage.setItem(DOCK_WIDTH_KEY, String(dockWidthRef.current)); } catch { /* ignore */ }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
 
   const pushHistory = useCallback((item: Omit<HistoryItem, "id" | "ts">) => {
     setHistory((h) => [
@@ -124,6 +152,7 @@ export default function Home() {
       .then((m) => {
         const active = m.providers.find((p) => p.active) ?? m.providers[0];
         setProviderLabel(`${active?.label ?? "mock"} · ${active?.current_model ?? ""}`);
+        setActiveVision(active?.supports_image ?? true);
       })
       .catch(() => setProviderLabel("mock · mock-transformer-v1"));
   }, [refresh]);
@@ -205,6 +234,7 @@ export default function Home() {
               provider: r.meta.provider,
               model: r.meta.model,
               latency: r.meta.latency_ms,
+              fewShot: r.meta.few_shot_id ?? null,
               candidate: r.candidate_project,
             },
           });
@@ -220,6 +250,7 @@ export default function Home() {
               provider: r.meta.provider,
               model: r.meta.model,
               latency: r.meta.latency_ms,
+              fewShot: r.meta.few_shot_id ?? null,
             },
           });
         }
@@ -369,6 +400,11 @@ export default function Home() {
     return doc?.elements.find((e) => e.id === selectedId) ?? null;
   }, [projectState, candidate, selectedId]);
 
+  const weightInfo = useMemo(
+    () => (selectedElement ? estimateElementWeightKg(selectedElement) : null),
+    [selectedElement],
+  );
+
   const actions = {
     newProject: async () => {
       try {
@@ -455,7 +491,7 @@ export default function Home() {
     <TooltipProvider>
       <div className="h-screen flex flex-col bg-slate-100 text-slate-900">
         {/* ---------- TOPBAR ---------- */}
-        <header className="flex items-center gap-2 px-3 sm:px-4 h-14 bg-[#1b2836] text-slate-100 shrink-0 border-b-4 border-orange-600" role="banner">
+        <header className="flex items-center gap-2 px-3 sm:px-4 h-14 bg-gradient-to-r from-[#141f2b] via-[#1b2836] to-[#223344] text-slate-100 shrink-0 border-b-4 border-orange-600 shadow-md" role="banner">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="h-8 w-8 rounded bg-orange-600 grid place-items-center font-black text-white text-sm shrink-0" aria-hidden>
               LC
@@ -538,20 +574,24 @@ export default function Home() {
 
             {/* vistas — linha única com scroll em telas pequenas + atalhos */}
             <div className="absolute top-2.5 left-1/2 -translate-x-1/2 max-w-[95%] flex items-center gap-1" role="toolbar" aria-label="Vistas da câmera">
-              <div className="flex items-center gap-0.5 bg-white/90 backdrop-blur rounded-full px-1.5 py-1 shadow-md border border-slate-200 overflow-x-auto cad-scroll max-w-full">
-                {VIEWS.map((v, i) => (
-                  <button
-                    key={v}
-                    onClick={() => setViewMode(v)}
-                    title={`${VIEW_LABELS[v]} (${i + 1})`}
-                    className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap transition-colors ${
-                      viewMode === v ? "bg-orange-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-200"
-                    }`}
-                    aria-pressed={viewMode === v}
-                  >
-                    {VIEW_LABELS[v]}
-                  </button>
-                ))}
+              <div className="relative flex items-center min-w-0 max-w-full">
+                <div className="flex items-center gap-0.5 bg-white/90 backdrop-blur rounded-full px-1.5 py-1 shadow-md border border-slate-200 overflow-x-auto cad-scroll max-w-full">
+                  {VIEWS.map((v, i) => (
+                    <button
+                      key={v}
+                      onClick={() => setViewMode(v)}
+                      title={`${VIEW_LABELS[v]} (${i + 1})`}
+                      className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap transition-colors ${
+                        viewMode === v ? "bg-orange-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-200"
+                      }`}
+                      aria-pressed={viewMode === v}
+                    >
+                      {VIEW_LABELS[v]}
+                    </button>
+                  ))}
+                </div>
+                {/* fade que indica scroll horizontal */}
+                <div className="pointer-events-none absolute inset-y-0 right-0 w-7 rounded-r-full bg-gradient-to-l from-white/95 via-white/60 to-transparent" aria-hidden />
               </div>
               <button
                 onClick={() => setSnapshotSignal((n) => n + 1)}
@@ -684,34 +724,49 @@ export default function Home() {
             )}
 
             {/* info do elemento selecionado */}
-            {selectedElement && (
-              <div className="absolute top-2.5 left-2.5 bg-white/95 border border-slate-200 shadow rounded-lg p-3 text-xs max-w-64" role="status">
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="font-bold text-orange-700">{selectedElement.id}</span>
-                  <button onClick={() => setSelectedId(null)} aria-label="Fechar info do elemento" className="text-slate-400 hover:text-slate-700">
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-                <div className="grid grid-cols-[64px_1fr] gap-x-2 gap-y-0.5 text-slate-600">
-                  <span className="text-slate-400">tipo</span><span>{selectedElement.type}</span>
-                  <span className="text-slate-400">role</span><span>{selectedElement.role}</span>
-                  <span className="text-slate-400">grupo</span><span className="truncate">{selectedElement.group}</span>
-                  {selectedElement.type === "beam" && (
-                    <>
-                      <span className="text-slate-400">perfil</span><span>{selectedElement.profile}</span>
-                      <span className="text-slate-400">start</span><span className="font-mono text-[10px]">{fmtV(selectedElement.start)}</span>
-                      <span className="text-slate-400">end</span><span className="font-mono text-[10px]">{fmtV(selectedElement.end)}</span>
-                    </>
-                  )}
-                  {selectedElement.type === "plate" && (
-                    <><span className="text-slate-400">size</span><span className="font-mono text-[10px]">{selectedElement.size_x}×{selectedElement.size_y}×{selectedElement.size_z}</span></>
-                  )}
-                  {selectedElement.type === "cable" && (
-                    <><span className="text-slate-400">Ø</span><span>{selectedElement.diameter} mm</span></>
-                  )}
-                </div>
-              </div>
-            )}
+            <AnimatePresence>
+              {selectedElement && (
+                <motion.div
+                  initial={{ opacity: 0, x: -12 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -12 }}
+                  transition={{ duration: 0.16 }}
+                  className="absolute top-2.5 left-2.5 bg-white/95 backdrop-blur border border-slate-200 shadow-lg rounded-xl p-3 text-xs max-w-64"
+                  role="status"
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="font-bold text-orange-700">{selectedElement.id}</span>
+                    <button onClick={() => setSelectedId(null)} aria-label="Fechar info do elemento" className="text-slate-400 hover:text-slate-700">
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-[64px_1fr] gap-x-2 gap-y-0.5 text-slate-600">
+                    <span className="text-slate-400">tipo</span><span>{selectedElement.type}</span>
+                    <span className="text-slate-400">role</span><span>{selectedElement.role}</span>
+                    <span className="text-slate-400">grupo</span><span className="truncate">{selectedElement.group}</span>
+                    {selectedElement.type === "beam" && (
+                      <>
+                        <span className="text-slate-400">perfil</span><span>{selectedElement.profile}</span>
+                        <span className="text-slate-400">start</span><span className="font-mono text-[10px]">{fmtV(selectedElement.start)}</span>
+                        <span className="text-slate-400">end</span><span className="font-mono text-[10px]">{fmtV(selectedElement.end)}</span>
+                      </>
+                    )}
+                    {selectedElement.type === "plate" && (
+                      <><span className="text-slate-400">size</span><span className="font-mono text-[10px]">{selectedElement.size_x}×{selectedElement.size_y}×{selectedElement.size_z}</span></>
+                    )}
+                    {selectedElement.type === "cable" && (
+                      <><span className="text-slate-400">Ø</span><span>{selectedElement.diameter} mm</span></>
+                    )}
+                    {weightInfo && (
+                      <>
+                        <span className="text-slate-400 flex items-center gap-1"><Weight className="h-3 w-3" /> peso</span>
+                        <span className="font-semibold text-slate-700">≈ {weightInfo < 10 ? weightInfo.toFixed(2) : weightInfo.toFixed(1)} kg</span>
+                      </>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* legenda de diff */}
             {candidate && (
@@ -772,8 +827,8 @@ export default function Home() {
 
           {/* DOCK (redimensionável em lg+) */}
           <div
-            className="relative h-[46vh] lg:h-auto shrink-0 min-h-0"
-            style={{ width: undefined }}
+            className="relative h-[46vh] lg:h-auto min-h-0 shrink-0 w-full lg:w-[var(--dock-w)]"
+            style={{ "--dock-w": `${dockWidth}px` } as React.CSSProperties}
             data-dock-wrap
           >
             {/* alça de redimensionamento (desktop) */}
@@ -781,20 +836,44 @@ export default function Home() {
               role="separator"
               aria-orientation="vertical"
               aria-label="Redimensionar painel lateral"
+              aria-valuenow={dockWidth}
+              aria-valuemin={DOCK_MIN}
+              aria-valuemax={DOCK_MAX}
               tabIndex={0}
               onMouseDown={(e) => {
                 dockDragRef.current = { startX: e.clientX, startW: dockWidth };
                 document.body.style.cursor = "col-resize";
+                document.body.style.userSelect = "none";
                 e.preventDefault();
+              }}
+              onKeyDown={(e) => {
+                const bump = (delta: number) => {
+                  const w = Math.min(DOCK_MAX, Math.max(DOCK_MIN, dockWidthRef.current + delta));
+                  dockWidthRef.current = w;
+                  setDockWidth(w);
+                  try { localStorage.setItem(DOCK_WIDTH_KEY, String(w)); } catch { /* ignore */ }
+                };
+                if (e.key === "ArrowLeft") {
+                  e.preventDefault();
+                  bump(24);
+                } else if (e.key === "ArrowRight") {
+                  e.preventDefault();
+                  bump(-24);
+                } else if (e.key === "Home") {
+                  e.preventDefault();
+                  dockWidthRef.current = DOCK_DEFAULT;
+                  setDockWidth(DOCK_DEFAULT);
+                  try { localStorage.setItem(DOCK_WIDTH_KEY, String(DOCK_DEFAULT)); } catch { /* ignore */ }
+                }
               }}
               onDoubleClick={() => {
                 setDockWidth(DOCK_DEFAULT);
                 try { localStorage.setItem(DOCK_WIDTH_KEY, String(DOCK_DEFAULT)); } catch { /* ignore */ }
               }}
               className="hidden lg:block absolute top-0 left-0 h-full w-1.5 -ml-0.5 cursor-col-resize z-20 group"
-              title="Arraste para redimensionar · duplo clique restaura"
+              title="Arraste para redimensionar · duplo clique restaura · ←/→ ajusta"
             >
-              <div className="h-full w-full bg-transparent group-hover:bg-orange-500/40 transition-colors" />
+              <div className="h-full w-full rounded-full bg-slate-300/50 group-hover:bg-orange-500/60 group-focus-visible:bg-orange-500 transition-colors" />
             </div>
             <div className="h-full w-full" style={{ width: "100%" }} data-dock-inner>
               {project && (
@@ -809,6 +888,7 @@ export default function Home() {
                   onPreviewCandidate={previewCandidate}
                   selectedElement={selectedElement}
                   activeProviderLabel={providerLabel}
+                  activeVision={activeVision}
                   onOpenProviders={() => setProviderModalOpen(true)}
                   onOpenJsonTab={() => setTab("json")}
                   onAppliedCandidate={() => void refresh()}

@@ -59,7 +59,7 @@ export interface TransformResult {
   warnings: unknown[];
   base_revision: number;
   base_hash: string;
-  meta: { provider: string; model: string; latency_ms: number; attempts: number };
+  meta: { provider: string; model: string; latency_ms: number; attempts: number; few_shot_id?: string | null };
 }
 
 export interface PreviewResult {
@@ -100,7 +100,7 @@ export const api = {
   meta: () =>
     call<{
       active_provider: string;
-      providers: Array<{ id: string; label: string; current_model: string; configured: boolean; active: boolean }>;
+      providers: Array<{ id: string; label: string; current_model: string; configured: boolean; active: boolean; supports_image: boolean }>;
     }>("/api/meta"),
   getProject: () => call<ProjectState>("/api/project"),
   newProject: (name?: string) =>
@@ -133,6 +133,10 @@ export const api = {
     }),
   transform: (input: { request: string; base_revision: number; base_hash: string; attachments?: Array<{ type: "image"; name: string; data_url: string }> }) =>
     call<TransformResult>("/api/ai/transform", { method: "POST", body: JSON.stringify(input) }),
+  listExamples: () =>
+    call<{ examples: Array<{ id: string; request: string; operator_note: string; saved_at: string; before_elements: number; after_elements: number; size_bytes: number }>; total: number }>(
+      "/api/examples",
+    ),
   preview: (candidate: unknown) => call<PreviewResult>("/api/preview", { method: "POST", body: JSON.stringify({ candidate }) }),
   apply: (input: { candidate: unknown; base_revision: number; base_hash: string; origin?: "ai" | "json" }) =>
     call<ProjectState & { message: string }>("/api/apply", { method: "POST", body: JSON.stringify(input) }),

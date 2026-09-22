@@ -81,6 +81,13 @@ export interface ExampleEntry {
   saved_at: string;
 }
 
+export interface ListedExample extends ExampleEntry {
+  id: string;
+  before_elements: number;
+  after_elements: number;
+  size_bytes: number;
+}
+
 interface PersistShape {
   revision: number;
   project: ProjectDocument;
@@ -411,7 +418,7 @@ class ProjectStore {
     return hash;
   }
 
-  // ---------- Examples (few-shot futuros) ----------
+  // ---------- Examples (few-shot) ----------
   saveExample(entry: Omit<ExampleEntry, "saved_at">): string {
     ensureDirs();
     const id = `${Date.now()}-${newProjectId()}.json`;
@@ -419,13 +426,53 @@ class ProjectStore {
     writeJsonAtomic(path.join(EXAMPLES_DIR, id), full);
     return id;
   }
+
+  /** Lista os exemplos salvos (mais recentes primeiro) para few-shot e UI. */
+  listExamples(): ListedExample[] {
+    ensureDirs();
+    const out: ListedExample[] = [];
+    try {
+      for (const f of fs.readdirSync(EXAMPLES_DIR)) {
+        if (!f.endsWith(".json")) continue;
+        const file = path.join(EXAMPLES_DIR, f);
+        const raw = readJson<(ExampleEntry & { project?: unknown }) | null>(file, null);
+        if (!raw || typeof raw.request !== "string") continue;
+        const beforeDoc = (raw.before as { elements?: unknown[] } | null) ?? null;
+        const afterDoc = (raw.after as { elements?: unknown[] } | null) ?? null;
+        out.push({
+          id: f.replace(/\.json$/, ""),
+          request: raw.request,
+          before: raw.before,
+          after: raw.after,
+          operator_note: raw.operator_note ?? "",
+          saved_at: raw.saved_at ?? new Date(0).toISOString(),
+          before_elements: Array.isArray(beforeDoc?.elements) ? beforeDoc!.elements!.length : 0,
+          after_elements: Array.isArray(afterDoc?.elements) ? afterDoc!.elements!.length : 0,
+          size_bytes: Buffer.byteLength(JSON.stringify(raw), "utf8"),
+        });
+      }
+    } catch {
+      // dir ausente
+    }
+    return out.sort((a, b) => b.saved_at.localeCompare(a.saved_at));
+  }
 }
 
-const globalStore = globalThis as unknown as { __ledCadStore?: ProjectStore };
+const globalStore = globalThis as unknown as { __ledCadStore?: ProjectStore; __ledCadStoreV?: number };
+
+/**
+ * Versão da "forma" da classe ProjectStore em memória.
+ * O singleton vive em globalThis para sobreviver entre módulos, mas em dev o HMR
+ * recompila a classe sem recriar a instância — instância antiga fica sem métodos novos
+ * ("store.listRevisions is not a function"). Bumpar STORE_VERSION ao mudar a classe
+ * força a recriação segura (todo estado é persistido em data/*.json e recarregado).
+ */
+const STORE_VERSION = 3;
 
 export function getStore(): ProjectStore {
-  if (!globalStore.__ledCadStore) {
+  if (!globalStore.__ledCadStore || globalStore.__ledCadStoreV !== STORE_VERSION) {
     globalStore.__ledCadStore = new ProjectStore();
+    globalStore.__ledCadStoreV = STORE_VERSION;
   }
   return globalStore.__ledCadStore;
 }
