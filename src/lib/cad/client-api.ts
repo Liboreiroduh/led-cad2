@@ -151,6 +151,7 @@ export const api = {
     }),
   saveExample: (input: { request: string; before: unknown; after: unknown; operator_note?: string }) =>
     call<{ id: string; message: string }>("/api/examples", { method: "POST", body: JSON.stringify(input) }),
+  deleteExample: (id: string) => call<{ id: string; message: string }>(`/api/examples/${encodeURIComponent(id)}`, { method: "DELETE" }),
   bom: (project?: unknown) =>
     call<{ rows: Array<{ item: string; description: string; group: string; qty: number; total_length_m: number | null; total_weight_kg: number }>; total_weight_kg: number; element_count: number }>(
       "/api/export/bom",

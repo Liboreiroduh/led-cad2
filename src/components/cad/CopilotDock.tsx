@@ -20,6 +20,7 @@ import type { Assumption, ProjectDocument, ProjectDiff } from "@/lib/cad/schema"
 import type { HistoryItem } from "./types";
 import { ElementBrowser } from "./ElementBrowser";
 import { RevisionHistory } from "./RevisionHistory";
+import { ExamplesManager } from "./ExamplesManager";
 import { toast } from "sonner";
 
 export type DockTab = "copiloto" | "json" | "presets" | "elementos" | "historico";
@@ -193,6 +194,8 @@ function CopilotTab(props: CopilotDockProps) {
         </div>
       )}
 
+      <ExamplesManager />
+
       <div className="border-t border-slate-200 p-3 space-y-2">
         {attachments.length > 0 && props.activeVision === false && (
           <button
@@ -351,9 +354,15 @@ function HistoryCard({ item, onSaveExample }: { item: HistoryItem; onSaveExample
           </ul>
         </div>
       )}
-      {m.candidate && !m.applied && (
-        <Button size="sm" variant="outline" className="mt-2 h-7 text-xs" onClick={() => onSaveExample(item)}>
-          <Save className="h-3 w-3 mr-1" /> salvar como exemplo
+      {!!m.candidate && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="mt-2 h-7 text-xs"
+          onClick={() => onSaveExample(item)}
+          title="Salva antes→depois desta transformação como referência few-shot (data/examples)"
+        >
+          <Save className="h-3 w-3 mr-1" /> salvar como exemplo{m.applied ? " · aplicada" : ""}
         </Button>
       )}
     </div>

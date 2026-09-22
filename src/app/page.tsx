@@ -13,7 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   FilePlus2, Upload, Undo2, FileSpreadsheet, FileDown, PlugZap, Loader2, X, Lock, RefreshCw,
-  Camera, Keyboard, Layers3, Ruler, Crosshair, GitCompare, MoveHorizontal, Weight,
+  Camera, Keyboard, Layers3, Ruler, Crosshair, GitCompare, MoveHorizontal, Weight, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { toast } from "sonner";
 import Viewer3D from "@/components/cad/Viewer3D";
@@ -768,18 +768,12 @@ export default function Home() {
               )}
             </AnimatePresence>
 
-            {/* legenda de diff */}
+            {/* legenda de diff → inspector detalhado ao clicar */}
             {candidate && (
-              <motion.div
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="absolute bottom-2.5 left-2.5 bg-white/90 backdrop-blur border border-slate-200 rounded-lg px-3 py-2 text-[11px] space-y-1 shadow-md"
-              >
-                <Legend color="#16a34a" label={`adicionadas (${candidate.diff.counts.added})`} />
-                <Legend color="#ea580c" label={`editadas (${candidate.diff.counts.modified})`} />
-                <Legend color="#dc2626" label={`removidas (${candidate.diff.counts.removed})`} />
-                <Legend color="#64748b" label="inalteradas" />
-              </motion.div>
+              <DiffInspector
+                diff={candidate.diff}
+                onPick={(id) => focusElement(id)}
+              />
             )}
 
             {/* PREVIEW BAR */}
@@ -1000,6 +994,106 @@ function Legend({ color, label }: { color: string; label: string }) {
       <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: color }} aria-hidden />
       {label}
     </div>
+  );
+}
+
+/**
+ * INSPECTOR DE DIFF — legenda clicável que expande a lista detalhada de elementos
+ * alterados (adicionadas/editadas/removidas). Clicar num ID enquadra o elemento no viewport.
+ */
+function DiffInspector({ diff, onPick }: { diff: ProjectDiff; onPick: (id: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const sections: Array<{ key: "added" | "modified" | "removed"; color: string; label: string; ids: string[]; clickable: boolean }> = [
+    { key: "added", color: "#16a34a", label: "adicionadas", ids: diff.added, clickable: true },
+    { key: "modified", color: "#ea580c", label: "editadas", ids: diff.modified, clickable: true },
+    { key: "removed", color: "#dc2626", label: "removidas", ids: diff.removed, clickable: false },
+  ];
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="absolute bottom-[108px] sm:bottom-[68px] left-2.5 max-w-72 bg-white/95 backdrop-blur border border-slate-200 rounded-xl shadow-md overflow-hidden z-10"
+    >
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="w-full flex items-center gap-2 px-3 py-2 text-[11px] hover:bg-slate-50 transition-colors"
+        title={open ? "Recolher detalhes do diff" : "Ver lista detalhada do diff"}
+      >
+        <span className="font-bold text-slate-700">DIFF</span>
+        <span className="flex items-center gap-2.5">
+          <Legend color="#16a34a" label={`+${diff.counts.added}`} />
+          <Legend color="#ea580c" label={`~${diff.counts.modified}`} />
+          <Legend color="#dc2626" label={`-${diff.counts.removed}`} />
+        </span>
+        {open ? <ChevronDown className="h-3.5 w-3.5 ml-auto text-slate-400" /> : <ChevronUp className="h-3.5 w-3.5 ml-auto text-slate-400" />}
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="border-t border-slate-200"
+          >
+            <div className="max-h-52 overflow-y-auto cad-scroll p-2.5 space-y-2">
+              {diff.counts.total === 0 && (
+                <p className="text-[11px] text-slate-500 px-0.5">Nenhuma alteração geométrica — apenas metadados.</p>
+              )}
+              {sections.map((s) =>
+                s.ids.length === 0 ? null : (
+                  <div key={s.key}>
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: s.color }} aria-hidden />
+                      <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                        {s.label} ({s.ids.length})
+                      </span>
+                      {!s.clickable && (
+                        <span className="text-[9.5px] text-slate-400 font-normal">· só no documento atual</span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {s.ids.slice(0, 40).map((id) =>
+                        s.clickable ? (
+                          <button
+                            key={id}
+                            onClick={() => onPick(id)}
+                            title={`Enquadrar ${id} no viewport`}
+                            className="px-1.5 py-0.5 rounded-md border font-mono text-[10px] transition-colors hover:text-white"
+                            style={{ borderColor: `${s.color}55`, color: s.color, backgroundColor: `${s.color}0d` }}
+                            onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = s.color)}
+                            onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = `${s.color}0d`)}
+                          >
+                            {id}
+                          </button>
+                        ) : (
+                          <span
+                            key={id}
+                            className="px-1.5 py-0.5 rounded-md border font-mono text-[10px] border-slate-300 text-slate-400 bg-slate-100 cursor-not-allowed line-through decoration-slate-300"
+                            title="Elemento existente apenas no documento atual — não presente no preview"
+                          >
+                            {id}
+                          </span>
+                        ),
+                      )}
+                      {s.ids.length > 40 && (
+                        <span className="text-[10px] text-slate-400 self-center">+{s.ids.length - 40}…</span>
+                      )}
+                    </div>
+                  </div>
+                ),
+              )}
+              {diff.panel_changed && (
+                <p className="text-[10.5px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
+                  Dimensões do painel alteradas — textura LED e vista regeneradas.
+                </p>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
   );
 }
 

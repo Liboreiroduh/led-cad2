@@ -421,9 +421,9 @@ class ProjectStore {
   // ---------- Examples (few-shot) ----------
   saveExample(entry: Omit<ExampleEntry, "saved_at">): string {
     ensureDirs();
-    const id = `${Date.now()}-${newProjectId()}.json`;
+    const id = `${Date.now()}-${newProjectId()}`;
     const full: ExampleEntry = { ...entry, saved_at: new Date().toISOString() };
-    writeJsonAtomic(path.join(EXAMPLES_DIR, id), full);
+    writeJsonAtomic(path.join(EXAMPLES_DIR, `${id}.json`), full);
     return id;
   }
 
@@ -456,6 +456,20 @@ class ProjectStore {
     }
     return out.sort((a, b) => b.saved_at.localeCompare(a.saved_at));
   }
+
+  /** Remove um exemplo few-shot por id (sem extensão). Retorna false se não existir. */
+  deleteExample(id: string): boolean {
+    // sanitiza: só nome de arquivo seguro (sem path traversal)
+    if (!/^[A-Za-z0-9._-]+$/.test(id)) return false;
+    const file = path.join(EXAMPLES_DIR, `${id}.json`);
+    try {
+      if (!fs.existsSync(file)) return false;
+      fs.rmSync(file);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }
 
 const globalStore = globalThis as unknown as { __ledCadStore?: ProjectStore; __ledCadStoreV?: number };
@@ -467,7 +481,7 @@ const globalStore = globalThis as unknown as { __ledCadStore?: ProjectStore; __l
  * ("store.listRevisions is not a function"). Bumpar STORE_VERSION ao mudar a classe
  * força a recriação segura (todo estado é persistido em data/*.json e recarregado).
  */
-const STORE_VERSION = 3;
+const STORE_VERSION = 5;
 
 export function getStore(): ProjectStore {
   if (!globalStore.__ledCadStore || globalStore.__ledCadStoreV !== STORE_VERSION) {
