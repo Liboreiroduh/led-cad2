@@ -17,6 +17,8 @@ const DATA_DIR = path.join(process.cwd(), "data");
 const PROJECT_FILE = path.join(DATA_DIR, "project.json");
 const UNDO_FILE = path.join(DATA_DIR, "undo.json");
 const AI_CONFIG_FILE = path.join(DATA_DIR, "ai_config.json");
+const REVISIONS_FILE = path.join(DATA_DIR, "revisions.json");
+const MAX_REVISION_LOG = 40;
 const CUSTOM_PRESETS_DIR = path.join(DATA_DIR, "presets", "custom");
 const EXAMPLES_DIR = path.join(DATA_DIR, "examples");
 
@@ -32,6 +34,30 @@ export interface UndoEntry {
   hash: string;
   project: ProjectDocument;
   saved_at: string;
+}
+
+export type RevisionSource = "init" | "ai_apply" | "manual_json" | "import" | "preset" | "undo" | "restore" | "new";
+
+export interface RevisionLogEntry {
+  revision: number;
+  hash: string;
+  saved_at: string;
+  source: RevisionSource;
+  note: string;
+  element_count: number;
+  panel: { width: number; height: number } | null;
+  project: ProjectDocument;
+}
+
+export interface RevisionListItem {
+  revision: number;
+  hash: string;
+  saved_at: string;
+  source: RevisionSource;
+  note: string;
+  element_count: number;
+  panel: { width: number; height: number } | null;
+  is_current: boolean;
 }
 
 export interface ProviderConfig {
@@ -93,6 +119,7 @@ const DEFAULT_AI_CONFIG: AiConfig = {
 class ProjectStore {
   state: PersistShape;
   undoStack: UndoEntry[];
+  revisionLog: RevisionLogEntry[];
   aiConfig: AiConfig;
   pendingPreviews = new Map<
     string,
@@ -123,6 +150,14 @@ class ProjectStore {
     this.undoStack = readJson<UndoEntry[]>(UNDO_FILE, []);
     if (!Array.isArray(this.undoStack)) this.undoStack = [];
     this.undoStack = this.undoStack.slice(-25);
+    this.revisionLog = readJson<RevisionLogEntry[]>(REVISIONS_FILE, []);
+    if (!Array.isArray(this.revisionLog)) this.revisionLog = [];
+    this.revisionLog = this.revisionLog.slice(-MAX_REVISION_LOG);
+    // garante entrada da revisão atual no log (boot antigo ou log corrompido)
+    if (!this.revisionLog.some((r) => r.revision === this.state.revision && r.hash === this.state.hash)) {
+      this.revisionLog.push(this.makeLogEntry(this.state.revision, this.state.project, "init", "estado carregado"));
+      if (this.revisionLog.length > MAX_REVISION_LOG) this.revisionLog = this.revisionLog.slice(-MAX_REVISION_LOG);
+    }
     const cfg = readJson<AiConfig | null>(AI_CONFIG_FILE, null);
     this.aiConfig = { ...DEFAULT_AI_CONFIG, ...(cfg ?? {}) };
     if (!this.aiConfig.gemini) this.aiConfig.gemini = DEFAULT_AI_CONFIG.gemini;
@@ -149,6 +184,23 @@ class ProjectStore {
     writeJsonAtomic(PROJECT_FILE, this.state);
     writeJsonAtomic(UNDO_FILE, this.undoStack);
     writeJsonAtomic(AI_CONFIG_FILE, this.aiConfig);
+    writeJsonAtomic(REVISIONS_FILE, this.revisionLog);
+  }
+
+  private makeLogEntry(revision: number, project: ProjectDocument, source: RevisionSource, note: string): RevisionLogEntry {
+    const panel = project.panel
+      ? { width: project.panel.width, height: project.panel.height }
+      : null;
+    return {
+      revision,
+      hash: projectHash(project),
+      saved_at: new Date().toISOString(),
+      source,
+      note,
+      element_count: project.elements?.length ?? 0,
+      panel,
+      project,
+    };
   }
 
   snapshotCurrent(): UndoEntry {
@@ -160,19 +212,25 @@ class ProjectStore {
     };
   }
 
-  /** Substitui o projeto atual (com snapshot para undo). */
-  private replace(project: ProjectDocument, note?: string): PersistShape {
+  /** Substitui o projeto atual (com snapshot para undo + log de revisão). */
+  private replace(
+    project: ProjectDocument,
+    source: RevisionSource = "manual_json",
+    note = "",
+  ): PersistShape {
     this.undoStack.push(this.snapshotCurrent());
     if (this.undoStack.length > 25) this.undoStack = this.undoStack.slice(-25);
     const now = new Date().toISOString();
+    const revision = this.state.revision + 1;
     this.state = {
-      revision: this.state.revision + 1,
+      revision,
       project,
       hash: projectHash(project),
       saved_at: now,
       updated_at: now,
     };
-    if (note) this.state.saved_at = now;
+    this.revisionLog.push(this.makeLogEntry(revision, project, source, note));
+    if (this.revisionLog.length > MAX_REVISION_LOG) this.revisionLog = this.revisionLog.slice(-MAX_REVISION_LOG);
     this.persistAll();
     return this.state;
   }
@@ -183,34 +241,76 @@ class ProjectStore {
     }
   }
 
-  applyCandidate(candidate: ProjectDocument, baseRevision: number, baseHash: string): PersistShape {
+  applyCandidate(
+    candidate: ProjectDocument,
+    baseRevision: number,
+    baseHash: string,
+    source: RevisionSource = "ai_apply",
+    note = "",
+  ): PersistShape {
     this.checkConflict(baseRevision, baseHash);
-    return this.replace(candidate);
+    return this.replace(candidate, source, note);
   }
 
-  applyValidatedRaw(raw: unknown, source: ProjectDocument["metadata"]["source"]): PersistShape {
+  applyValidatedRaw(
+    raw: unknown,
+    source: ProjectDocument["metadata"]["source"],
+    revSource: RevisionSource = "import",
+    note = "documento importado",
+  ): PersistShape {
     const result = parseProject(raw);
     if (!result.ok) {
       const err = new Error("documento inválido") as Error & { issues?: ValidationIssue[] };
       err.issues = result.errors;
       throw err;
     }
-    return this.replace(result.project);
+    return this.replace(result.project, revSource, note);
   }
 
   undo(): PersistShape | null {
     const prev = this.undoStack.pop();
     if (!prev) return null;
     const now = new Date().toISOString();
+    const revision = this.state.revision + 1;
     this.state = {
-      revision: this.state.revision + 1,
+      revision,
       project: prev.project,
       hash: projectHash(prev.project),
       saved_at: prev.saved_at,
       updated_at: now,
     };
+    this.revisionLog.push(this.makeLogEntry(revision, prev.project, "undo", `desfeito → rev ${prev.revision}`));
+    if (this.revisionLog.length > MAX_REVISION_LOG) this.revisionLog = this.revisionLog.slice(-MAX_REVISION_LOG);
     this.persistAll();
     return this.state;
+  }
+
+  // ---------- Revision history ----------
+  listRevisions(): RevisionListItem[] {
+    return [...this.revisionLog]
+      .sort((a, b) => b.revision - a.revision)
+      .map((r) => ({
+        revision: r.revision,
+        hash: r.hash,
+        saved_at: r.saved_at,
+        source: r.source,
+        note: r.note,
+        element_count: r.element_count,
+        panel: r.panel,
+        is_current: r.revision === this.state.revision && r.hash === this.state.hash,
+      }));
+  }
+
+  getRevision(revision: number): RevisionLogEntry | null {
+    return this.revisionLog.find((r) => r.revision === revision) ?? null;
+  }
+
+  /** Restaura o documento de uma revisão antiga como NOVA revisão (com snapshot p/ undo). */
+  restoreRevision(revision: number, baseRevision: number, baseHash: string): PersistShape {
+    const entry = this.getRevision(revision);
+    if (!entry) throw new Error(`revisão ${revision} não encontrada no histórico`);
+    this.checkConflict(baseRevision, baseHash);
+    return this.replace(entry.project, "restore", `restaurada da rev ${revision}`);
   }
 
   // ---------- Presets ----------
@@ -251,7 +351,7 @@ class ProjectStore {
   loadPreset(id: string): PersistShape {
     const doc = this.getPresetDoc(id);
     if (!doc) throw new Error(`preset não encontrado: ${id}`);
-    return this.replace(doc);
+    return this.replace(doc, "preset", `preset ${id} carregado`);
   }
 
   saveCustomPreset(project: ProjectDocument): { id: string } {

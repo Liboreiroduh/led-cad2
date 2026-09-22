@@ -8,7 +8,7 @@ export async function POST(req: Request) {
   try {
     const body = await readJsonBody<{ name?: string }>(req).catch(() => ({ name: undefined }));
     const doc = blankProject(body?.name || "Novo Painel LED");
-    const state = getStore().applyValidatedRaw(doc, "manual");
+    const state = getStore().applyValidatedRaw(doc, "manual", "new", "novo projeto em branco");
     return ok({ revision: state.revision, hash: state.hash, project: state.project });
   } catch (e) {
     return handleError(e);

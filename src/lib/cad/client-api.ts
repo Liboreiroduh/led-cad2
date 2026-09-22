@@ -73,6 +73,28 @@ export interface PreviewResult {
   base_hash?: string;
 }
 
+export interface RevisionListItem {
+  revision: number;
+  hash: string;
+  saved_at: string;
+  source: "init" | "ai_apply" | "manual_json" | "import" | "preset" | "undo" | "restore" | "new";
+  note: string;
+  element_count: number;
+  panel: { width: number; height: number } | null;
+  is_current: boolean;
+}
+
+export interface RevisionDocResult {
+  revision: number;
+  hash: string;
+  saved_at: string;
+  source: RevisionListItem["source"];
+  note: string;
+  element_count: number;
+  panel: { width: number; height: number } | null;
+  project: ProjectDocument;
+}
+
 export const api = {
   health: () => call<{ ok: boolean; revision: number }>("/api/health"),
   meta: () =>
@@ -112,9 +134,17 @@ export const api = {
   transform: (input: { request: string; base_revision: number; base_hash: string; attachments?: Array<{ type: "image"; name: string; data_url: string }> }) =>
     call<TransformResult>("/api/ai/transform", { method: "POST", body: JSON.stringify(input) }),
   preview: (candidate: unknown) => call<PreviewResult>("/api/preview", { method: "POST", body: JSON.stringify({ candidate }) }),
-  apply: (input: { candidate: unknown; base_revision: number; base_hash: string }) =>
+  apply: (input: { candidate: unknown; base_revision: number; base_hash: string; origin?: "ai" | "json" }) =>
     call<ProjectState & { message: string }>("/api/apply", { method: "POST", body: JSON.stringify(input) }),
   undo: () => call<ProjectState & { message: string }>("/api/undo", { method: "POST" }),
+  listRevisions: () =>
+    call<{ revisions: RevisionListItem[]; current: number }>("/api/project/history"),
+  getRevisionDoc: (rev: number) => call<RevisionDocResult>(`/api/project/history?rev=${rev}`),
+  restoreRevision: (revision: number) =>
+    call<ProjectState & { message: string }>("/api/project/restore", {
+      method: "POST",
+      body: JSON.stringify({ revision }),
+    }),
   saveExample: (input: { request: string; before: unknown; after: unknown; operator_note?: string }) =>
     call<{ id: string; message: string }>("/api/examples", { method: "POST", body: JSON.stringify(input) }),
   bom: (project?: unknown) =>

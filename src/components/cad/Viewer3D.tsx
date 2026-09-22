@@ -1,8 +1,9 @@
 "use client";
 
 /**
- * Viewer3D — viewport Three.js com OrbitControls, vistas, seleção por raycast
- * e preview ghost (added=verde, modified=laranja, removed=vermelho).
+ * Viewer3D — viewport Three.js com OrbitControls, vistas, seleção por raycast,
+ * preview ghost (added=verde, modified=laranja, removed=vermelho),
+ * cotas de envelope (L/H/P) e ferramenta de medição de distâncias.
  */
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
@@ -10,6 +11,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
   buildProjectGroup,
   buildEnvironment,
+  buildDimensionGroup,
   viewDirection,
   STATUS_COLORS,
   type StatusMap,
@@ -32,6 +34,12 @@ export interface Viewer3DProps {
   focusRequest?: { id: string; nonce: number } | null;
   /** nonce > 0 dispara download de PNG do viewport */
   snapshotSignal?: number;
+  /** exibir cotas de envelope (largura/altura/profundidade) */
+  showDimensions?: boolean;
+  /** modo medição: cliques no modelo marcam pontos e mostram distância */
+  measureMode?: boolean;
+  /** resultado da última medição (limpo com null) */
+  onMeasureResult?: (r: { distance: number } | null) => void;
 }
 
 interface RefState {
@@ -43,6 +51,23 @@ interface RefState {
   bbox: THREE.Box3;
   selectionHelper: THREE.BoxHelper | null;
   byId: Map<string, THREE.Object3D[]>;
+  dims: THREE.Group | null;
+  measure: THREE.Group | null;
+  measurePoints: THREE.Vector3[];
+}
+
+const MEASURE_COLOR = 0xea580c;
+
+function disposeDeep(obj: THREE.Object3D): void {
+  obj.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (mesh.geometry) mesh.geometry.dispose();
+    const mat = (mesh.material as THREE.Material | THREE.Material[] | undefined);
+    if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+    else mat?.dispose();
+    const spr = o as THREE.Sprite;
+    if (spr.isSprite) spr.material.map?.dispose();
+  });
 }
 
 export default function Viewer3D(props: Viewer3DProps) {
@@ -87,7 +112,11 @@ export default function Viewer3D(props: Viewer3DProps) {
     const content = new THREE.Group();
     scene.add(content);
 
-    stateRef.current = { renderer, scene, camera, controls, content, bbox: new THREE.Box3(), selectionHelper: null, byId: new Map() };
+    stateRef.current = {
+      renderer, scene, camera, controls, content,
+      bbox: new THREE.Box3(), selectionHelper: null, byId: new Map(),
+      dims: null, measure: null, measurePoints: [],
+    };
 
     let raf = 0;
     const animate = () => {
@@ -108,20 +137,21 @@ export default function Viewer3D(props: Viewer3DProps) {
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
-    const pick = (ev: PointerEvent): string | null => {
+    const pick = (ev: PointerEvent): { id: string | null; point: THREE.Vector3 | null } => {
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
-      const hits = raycaster.intersectObjects(stateRef.current!.content.children, true);
+      const hits = raycaster.intersectObjects(stateRef.current!.content.children, true)
+        .filter((h) => h.object.visible);
       for (const hit of hits) {
         let obj: THREE.Object3D | null = hit.object;
         while (obj) {
-          if (obj.userData.elementId) return obj.userData.elementId as string;
+          if (obj.userData.elementId) return { id: obj.userData.elementId as string, point: hit.point.clone() };
           obj = obj.parent;
         }
       }
-      return null;
+      return { id: null, point: hits[0]?.point.clone() ?? null };
     };
 
     const dom = renderer.domElement;
@@ -134,11 +164,19 @@ export default function Viewer3D(props: Viewer3DProps) {
       if (!down) return;
       const moved = Math.hypot(ev.clientX - down.x, ev.clientY - down.y);
       if (moved > 5) return;
-      const id = pick(ev);
+      const { id, point } = pick(ev);
+      if (propsRef.current.measureMode) {
+        if (point) addMeasurePoint(stateRef.current!, point, propsRef.current.onMeasureResult);
+        return; // em modo medição o clique não seleciona
+      }
       propsRef.current.onSelect(id);
     };
     const onPointerMove = (ev: PointerEvent) => {
-      const id = pick(ev);
+      if (propsRef.current.measureMode) {
+        dom.style.cursor = "crosshair";
+        return;
+      }
+      const { id } = pick(ev);
       dom.style.cursor = id ? "pointer" : "default";
     };
     dom.addEventListener("pointerdown", onPointerDown);
@@ -163,24 +201,17 @@ export default function Viewer3D(props: Viewer3DProps) {
     const st = stateRef.current;
     if (!st) return;
     // limpa conteúdo anterior (dispose de geometrias)
-    const disposeGroup = (g: THREE.Group) => {
-      g.traverse((o) => {
-        const mesh = o as THREE.Mesh;
-        if (mesh.geometry) mesh.geometry.dispose();
-        const mat = mesh.material as THREE.Material | THREE.Material[] | undefined;
-        if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-        else mat?.dispose();
-      });
-    };
     for (const child of [...st.content.children]) {
       st.content.remove(child);
-      if ((child as THREE.Group).isGroup || (child as THREE.Mesh).isMesh) disposeGroup(child as THREE.Group);
+      disposeDeep(child);
     }
     if (st.selectionHelper) {
       st.scene.remove(st.selectionHelper);
       st.selectionHelper.geometry.dispose();
       st.selectionHelper = null;
     }
+    // medição perde sentido após rebuild
+    clearMeasure(st, propsRef.current.onMeasureResult);
 
     const { project, candidate, statuses, candidateStatuses, hiddenIds } = propsRef.current;
     st.bbox.makeEmpty();
@@ -203,10 +234,18 @@ export default function Viewer3D(props: Viewer3DProps) {
     }
 
     applyVisibility(st, hiddenIds);
+    rebuildDims(st, propsRef.current.showDimensions);
     fitViewInternal(st, propsRef.current.viewMode);
     // reaplica highlight atual
     applyHighlightInternal(st, propsRef.current.selectedId);
   }, [props.project, props.candidate, props.statuses, props.candidateStatuses, props.fitKey]);
+
+  // ---------- cotas toggle ----------
+  useEffect(() => {
+    const st = stateRef.current;
+    if (!st) return;
+    rebuildDims(st, props.showDimensions);
+  }, [props.showDimensions]);
 
   // ---------- view mode ----------
   useEffect(() => {
@@ -214,6 +253,13 @@ export default function Viewer3D(props: Viewer3DProps) {
     if (!st) return;
     fitViewInternal(st, props.viewMode);
   }, [props.viewMode]);
+
+  // ---------- measure mode off → limpa ----------
+  useEffect(() => {
+    const st = stateRef.current;
+    if (!st) return;
+    if (!props.measureMode) clearMeasure(st, props.onMeasureResult);
+  }, [props.measureMode]);
 
   // ---------- selection highlight ----------
   useEffect(() => {
@@ -268,6 +314,113 @@ export default function Viewer3D(props: Viewer3DProps) {
   return <div ref={mountRef} className="absolute inset-0" aria-label="Viewport 3D do projeto" role="application" />;
 }
 
+/* ------------------------- cotas ------------------------- */
+
+function rebuildDims(st: RefState, show: boolean | undefined): void {
+  if (st.dims) {
+    st.scene.remove(st.dims);
+    disposeDeep(st.dims);
+    st.dims = null;
+  }
+  if (!show) return;
+  const g = buildDimensionGroup(st.bbox);
+  if (!g) return;
+  st.scene.add(g);
+  st.dims = g;
+}
+
+/* ------------------------- medição ------------------------- */
+
+function measureLabelSprite(text: string, worldHeight: number): THREE.Sprite {
+  const c = document.createElement("canvas");
+  c.width = 512;
+  c.height = 128;
+  const g = c.getContext("2d")!;
+  g.fillStyle = "rgba(234,88,12,0.95)";
+  g.beginPath();
+  g.roundRect(6, 14, c.width - 12, c.height - 28, 24);
+  g.fill();
+  g.fillStyle = "#ffffff";
+  g.font = "bold 64px ui-sans-serif, system-ui, sans-serif";
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.fillText(text, c.width / 2, c.height / 2 + 2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(worldHeight * 4, worldHeight, 1);
+  sprite.renderOrder = 1000;
+  return sprite;
+}
+
+function fmtMeasure(mm: number): string {
+  return `${Math.round(mm)} mm${mm >= 1000 ? ` (${(mm / 1000).toFixed(3)} m)` : ""}`;
+}
+
+function clearMeasure(st: RefState, onMeasureResult?: (r: { distance: number } | null) => void): void {
+  if (st.measure) {
+    st.scene.remove(st.measure);
+    disposeDeep(st.measure);
+    st.measure = null;
+  }
+  st.measurePoints = [];
+  onMeasureResult?.(null);
+}
+
+function addMeasurePoint(
+  st: RefState,
+  point: THREE.Vector3,
+  onMeasureResult?: (r: { distance: number } | null) => void,
+): void {
+  const diag = st.bbox.isEmpty() ? 5000 : st.bbox.getSize(new THREE.Vector3()).length();
+  const markerR = Math.max(diag * 0.012, 12);
+
+  // reinicia se já havia 2 pontos
+  if (st.measurePoints.length >= 2) {
+    if (st.measure) {
+      st.scene.remove(st.measure);
+      disposeDeep(st.measure);
+      st.measure = null;
+    }
+    st.measurePoints = [];
+    onMeasureResult?.(null);
+  }
+
+  st.measurePoints.push(point.clone());
+
+  if (!st.measure) {
+    st.measure = new THREE.Group();
+    st.measure.name = "measure";
+    st.scene.add(st.measure);
+  }
+
+  const marker = new THREE.Mesh(
+    new THREE.SphereGeometry(markerR, 16, 16),
+    new THREE.MeshBasicMaterial({ color: MEASURE_COLOR, depthTest: false, transparent: true, opacity: 0.95 }),
+  );
+  marker.renderOrder = 998;
+  marker.position.copy(point);
+  st.measure.add(marker);
+
+  if (st.measurePoints.length === 2) {
+    const [a, b] = st.measurePoints;
+    const dist = a.distanceTo(b);
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([a, b]),
+      new THREE.LineBasicMaterial({ color: MEASURE_COLOR, depthTest: false }),
+    );
+    line.renderOrder = 998;
+    st.measure.add(line);
+    const label = measureLabelSprite(fmtMeasure(dist), Math.max(diag * 0.03, 36));
+    label.position.copy(a).add(b).multiplyScalar(0.5).add(new THREE.Vector3(0, diag * 0.03, 0));
+    st.measure.add(label);
+    onMeasureResult?.({ distance: dist });
+  }
+}
+
+/* ------------------------- helpers ------------------------- */
+
 function applyVisibility(st: RefState, hiddenIds?: Set<string>): void {
   for (const [, objs] of st.byId) {
     for (const o of objs) {
@@ -302,7 +455,7 @@ function applyHighlightInternal(st: RefState, selectedId: string | null): void {
     const mesh = o as THREE.Mesh;
     if (!mesh.isMesh) return;
     const mat = mesh.material as THREE.MeshStandardMaterial;
-    if (!mat || !("emissive" in mat)) return;
+    if (!mat || !("emissive" in mat) || Array.isArray(mesh.material)) return;
     if (mesh.userData._baseEmissive === undefined) {
       mesh.userData._baseEmissive = mat.emissive.getHex();
       mesh.userData._baseIntensity = mat.emissiveIntensity;

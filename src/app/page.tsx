@@ -13,7 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   FilePlus2, Upload, Undo2, FileSpreadsheet, FileDown, PlugZap, Loader2, X, Lock, RefreshCw,
-  Camera, Keyboard, Layers3,
+  Camera, Keyboard, Layers3, Ruler, Crosshair, GitCompare, MoveHorizontal,
 } from "lucide-react";
 import { toast } from "sonner";
 import Viewer3D from "@/components/cad/Viewer3D";
@@ -44,6 +44,10 @@ interface CandidateState {
 }
 
 const HISTORY_KEY = "led-json-cad:history:v1";
+const DOCK_WIDTH_KEY = "led-json-cad:dockwidth:v1";
+const DOCK_MIN = 320;
+const DOCK_MAX = 680;
+const DOCK_DEFAULT = 390;
 
 const ERRORS_FRIENDLY: Record<string, string> = {
   provider_timeout: "O provider de IA excedeu o tempo limite. Tente novamente — se persistir, troque o modelo no Conector de IA.",
@@ -73,6 +77,14 @@ export default function Home() {
   const [focusRequest, setFocusRequest] = useState<{ id: string; nonce: number } | null>(null);
   const [snapshotSignal, setSnapshotSignal] = useState(0);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [showDimensions, setShowDimensions] = useState(true);
+  const [measureMode, setMeasureMode] = useState(false);
+  const [measureResult, setMeasureResult] = useState<{ distance: number } | null>(null);
+  const [comparingRev, setComparingRev] = useState<number | null>(null);
+  const [restoreInfo, setRestoreInfo] = useState<number | null>(null);
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const [dockWidth, setDockWidth] = useState(DOCK_DEFAULT);
+  const dockDragRef = useRef<{ startX: number; startW: number } | null>(null);
 
   const pushHistory = useCallback((item: Omit<HistoryItem, "id" | "ts">) => {
     setHistory((h) => [
@@ -86,6 +98,11 @@ export default function Home() {
     try {
       const raw = localStorage.getItem(HISTORY_KEY);
       if (raw) setHistory(JSON.parse(raw) as HistoryItem[]);
+      const w = localStorage.getItem(DOCK_WIDTH_KEY);
+      if (w) {
+        const n = Number.parseInt(w, 10);
+        if (Number.isFinite(n) && n >= DOCK_MIN && n <= DOCK_MAX) setDockWidth(n);
+      }
     } catch {
       // ignora storage corrompido
     }
@@ -121,6 +138,8 @@ export default function Home() {
       }
       if (e.key === "Escape") {
         setSelectedId(null);
+        setMeasureMode(false);
+        setMeasureResult(null);
         return;
       }
       const target = e.target as HTMLElement | null;
@@ -128,6 +147,8 @@ export default function Home() {
       const viewKeys = ["1", "2", "3", "4", "5", "6", "7"];
       const idx = viewKeys.indexOf(e.key);
       if (idx >= 0) setViewMode(VIEWS[idx]);
+      if (e.key.toLowerCase() === "d") setShowDimensions((v) => !v);
+      if (e.key.toLowerCase() === "m") setMeasureMode((v) => !v);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -138,6 +159,8 @@ export default function Home() {
       const st = await api.undo();
       setProjectState(st);
       setCandidate(null);
+      setRestoreInfo(null);
+      setHistoryRefreshKey((k) => k + 1);
       pushHistory({ role: "info", text: st.message ?? "desfeito" });
       toast.success("Desfeito — JSON anterior restaurado");
     } catch (e) {
@@ -244,13 +267,18 @@ export default function Home() {
   const applyCandidate = useCallback(async () => {
     if (!candidate) return;
     try {
-      const st = await api.apply({
-        candidate: candidate.project,
-        base_revision: candidate.baseRevision,
-        base_hash: candidate.baseHash,
-      });
+      // restauração de revisão usa a rota dedicada (source "restore" no log)
+      const st = restoreInfo !== null
+        ? await api.restoreRevision(restoreInfo)
+        : await api.apply({
+            candidate: candidate.project,
+            base_revision: candidate.baseRevision,
+            base_hash: candidate.baseHash,
+          });
       setProjectState(st);
       setCandidate(null);
+      setRestoreInfo(null);
+      setHistoryRefreshKey((k) => k + 1);
       setHistory((h) =>
         h.map((item) =>
           item.role === "assistant" && item.meta?.candidate && !item.meta.applied
@@ -258,19 +286,63 @@ export default function Home() {
             : item,
         ),
       );
-      pushHistory({ role: "info", text: `Candidato aplicado — revision ${st.revision}.` });
-      toast.success(`Aplicado — revision ${st.revision}`);
+      pushHistory({
+        role: "info",
+        text: restoreInfo !== null
+          ? `Revisão ${restoreInfo} restaurada como revision ${st.revision}.`
+          : `Candidato aplicado — revision ${st.revision}.`,
+      });
+      toast.success(restoreInfo !== null ? `Revisão ${restoreInfo} restaurada — rev ${st.revision}` : `Aplicado — revision ${st.revision}`);
     } catch (e) {
       const err = e as ApiCallError;
       if (err.status === 409) {
         toast.error("O projeto mudou desde o preview — regenere o candidato.");
         setCandidate(null);
+        setRestoreInfo(null);
         void refresh();
       } else {
         toast.error(err.payload?.message ?? err.message);
       }
     }
-  }, [candidate, pushHistory, refresh]);
+  }, [candidate, restoreInfo, pushHistory, refresh]);
+
+  // ---------- comparação com revisão do histórico ----------
+  const compareRevision = useCallback(async (rev: number) => {
+    if (!projectState) return;
+    setComparingRev(rev);
+    setRestoreInfo(null);
+    try {
+      const entry = await api.getRevisionDoc(rev);
+      const r = await api.preview(entry.project);
+      if (r.ok && r.diff && r.base_revision != null && r.base_hash != null) {
+        setCandidate({
+          project: entry.project,
+          diff: r.diff,
+          diffSummary: r.diff_summary ?? "",
+          baseRevision: r.base_revision,
+          baseHash: r.base_hash,
+          hash: r.candidate_hash ?? "",
+        });
+        setRestoreInfo(rev);
+        pushHistory({
+          role: "info",
+          text: `Comparando rev ${rev} com a atual — ${r.diff_summary}. APLICAR restaura a rev ${rev}; CANCELAR descarta.`,
+        });
+      } else if (!r.ok) {
+        toast.error("Documento da revisão falhou na validação atual.");
+      }
+    } catch (e) {
+      toast.error((e as ApiCallError).payload?.message ?? (e as ApiCallError).message);
+    } finally {
+      setComparingRev(null);
+    }
+  }, [projectState, pushHistory]);
+
+  const cancelCandidate = useCallback(() => {
+    setCandidate(null);
+    setRestoreInfo(null);
+    pushHistory({ role: "info", text: "Preview cancelado — documento atual preservado." });
+  }, [pushHistory]);
 
   // ---------- status maps para o viewer ----------
   const { statuses, candidateStatuses } = useMemo((): { statuses: StatusMap; candidateStatuses: StatusMap } => {
@@ -303,6 +375,8 @@ export default function Home() {
         const st = await api.newProject();
         setProjectState(st);
         setCandidate(null);
+        setRestoreInfo(null);
+        setHistoryRefreshKey((k) => k + 1);
         pushHistory({ role: "info", text: "Novo projeto em branco criado." });
       } catch (e) {
         toast.error((e as ApiCallError).message);
@@ -315,6 +389,8 @@ export default function Home() {
         const st = await api.importProject(doc);
         setProjectState(st);
         setCandidate(null);
+        setRestoreInfo(null);
+        setHistoryRefreshKey((k) => k + 1);
         pushHistory({ role: "info", text: "JSON importado e validado." });
         toast.success("Projeto importado");
       } catch (e) {
@@ -450,6 +526,9 @@ export default function Home() {
                 hiddenIds={hiddenIds}
                 focusRequest={focusRequest}
                 snapshotSignal={snapshotSignal}
+                showDimensions={showDimensions}
+                measureMode={measureMode}
+                onMeasureResult={setMeasureResult}
               />
             ) : (
               <div className="absolute inset-0 grid place-items-center text-slate-400">
@@ -481,6 +560,35 @@ export default function Home() {
                 className="h-8 w-8 grid place-items-center rounded-full bg-white/90 backdrop-blur shadow-md border border-slate-200 text-slate-600 hover:text-orange-600 hover:border-orange-300 transition-colors shrink-0"
               >
                 <Camera className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => {
+                  setShowDimensions((v) => !v);
+                  setShortcutsOpen(false);
+                }}
+                title={`Cotas L/H/P (D) — ${showDimensions ? "ativas" : "desativadas"}`}
+                aria-label="Alternar cotas de dimensões"
+                aria-pressed={showDimensions}
+                className={`h-8 w-8 grid place-items-center rounded-full shadow-md border transition-colors shrink-0 ${
+                  showDimensions ? "bg-orange-600 border-orange-600 text-white" : "bg-white/90 border-slate-200 text-slate-600 hover:text-orange-600 hover:border-orange-300"
+                }`}
+              >
+                <Ruler className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => {
+                  setMeasureMode((v) => !v);
+                  setMeasureResult(null);
+                  setShortcutsOpen(false);
+                }}
+                title={`Medir distância entre dois pontos (M) — ${measureMode ? "ativo" : "inativo"}`}
+                aria-label="Alternar ferramenta de medição"
+                aria-pressed={measureMode}
+                className={`h-8 w-8 grid place-items-center rounded-full shadow-md border transition-colors shrink-0 ${
+                  measureMode ? "bg-orange-600 border-orange-600 text-white" : "bg-white/90 border-slate-200 text-slate-600 hover:text-orange-600 hover:border-orange-300"
+                }`}
+              >
+                <Crosshair className="h-4 w-4" />
               </button>
               <button
                 onClick={() => setShortcutsOpen((o) => !o)}
@@ -521,7 +629,15 @@ export default function Home() {
                       <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Ctrl+Z</kbd>
                     </li>
                     <li className="flex items-center justify-between">
-                      <span>Desselecionar</span>
+                      <span>Cotas L/H/P</span>
+                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">D</kbd>
+                    </li>
+                    <li className="flex items-center justify-between">
+                      <span>Medir distância</span>
+                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">M</kbd>
+                    </li>
+                    <li className="flex items-center justify-between">
+                      <span>Desselecionar / sair do modo</span>
                       <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Esc</kbd>
                     </li>
                     <li className="flex items-center justify-between">
@@ -532,6 +648,27 @@ export default function Home() {
                 </motion.div>
               )}
             </AnimatePresence>
+
+            {/* badge do modo medição */}
+            {measureMode && (
+              <motion.div
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="absolute top-12 right-3 flex items-center gap-2 bg-white/95 backdrop-blur border border-orange-300 shadow-lg rounded-lg px-3 py-1.5 text-[11px] z-10"
+                role="status"
+              >
+                <Crosshair className="h-3.5 w-3.5 text-orange-600" />
+                {measureResult ? (
+                  <span className="font-bold text-orange-700 flex items-center gap-1.5">
+                    <MoveHorizontal className="h-3.5 w-3.5" />
+                    {Math.round(measureResult.distance)} mm
+                    <span className="text-slate-400 font-normal">({(measureResult.distance / 1000).toFixed(3)} m)</span>
+                  </span>
+                ) : (
+                  <span className="text-slate-600">clique em 2 pontos do modelo para medir · Esc sai</span>
+                )}
+              </motion.div>
+            )}
 
             {/* badge grupo isolado */}
             {isolatedGroup && (
@@ -603,23 +740,26 @@ export default function Home() {
                   aria-label="Preview de alterações propostas"
                 >
                   <div className="text-sm flex-1 min-w-0">
-                    <span className="font-bold text-orange-400">{candidate.diff.counts.total} alterações propostas</span>
+                    {restoreInfo !== null ? (
+                      <span className="font-bold text-amber-300 flex items-center gap-1.5 flex-wrap">
+                        <GitCompare className="h-4 w-4" /> COMPARAÇÃO COM REV {restoreInfo}
+                      </span>
+                    ) : (
+                      <span className="font-bold text-orange-400">{candidate.diff.counts.total} alterações propostas</span>
+                    )}
                     <span className="text-slate-300 text-xs ml-2 hidden sm:inline truncate">
                       {candidate.diff.counts.added} novas · {candidate.diff.counts.modified} editadas · {candidate.diff.counts.removed} removidas
                       {candidate.diff.panel_changed ? " · painel alterado" : ""}
                     </span>
                   </div>
                   <div className="flex gap-2">
-                    <Button size="sm" onClick={() => void applyCandidate()} className="bg-green-600 hover:bg-green-700 text-white font-bold px-5 shadow-lg shadow-green-900/40">
-                      APLICAR
+                    <Button size="sm" onClick={() => void applyCandidate()} className={restoreInfo !== null ? "bg-amber-500 hover:bg-amber-600 text-white font-bold px-5 shadow-lg shadow-amber-900/40" : "bg-green-600 hover:bg-green-700 text-white font-bold px-5 shadow-lg shadow-green-900/40"}>
+                      {restoreInfo !== null ? `RESTAURAR REV ${restoreInfo}` : "APLICAR"}
                     </Button>
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => {
-                        setCandidate(null);
-                        pushHistory({ role: "info", text: "Preview cancelado — documento atual preservado." });
-                      }}
+                      onClick={cancelCandidate}
                       className="border-slate-500 text-slate-200 hover:bg-slate-700"
                     >
                       CANCELAR
@@ -630,33 +770,63 @@ export default function Home() {
             </AnimatePresence>
           </section>
 
-          {/* DOCK */}
-          <div className="h-[46vh] lg:h-auto lg:w-[390px] xl:w-[420px] shrink-0 min-h-0">
-            {project && (
-              <CopilotDock
-                tab={tab}
-                onTabChange={setTab}
-                history={history}
-                sending={sending}
-                onSend={(t, a) => void sendRequest(t, a)}
-                project={project}
-                projectKey={`${projectState!.revision}:${projectState!.hash.slice(0, 8)}`}
-                onPreviewCandidate={previewCandidate}
-                selectedElement={selectedElement}
-                activeProviderLabel={providerLabel}
-                onOpenProviders={() => setProviderModalOpen(true)}
-                onOpenJsonTab={() => setTab("json")}
-                onAppliedCandidate={() => void refresh()}
-                selectedId={selectedId}
-                onSelect={setSelectedId}
-                hiddenIds={hiddenIds}
-                onToggleHidden={toggleHidden}
-                onIsolateGroup={isolateGroup}
-                isolatedGroup={isolatedGroup}
-                onFocusElement={focusElement}
-                candidateDoc={candidate?.project ?? null}
-              />
-            )}
+          {/* DOCK (redimensionável em lg+) */}
+          <div
+            className="relative h-[46vh] lg:h-auto shrink-0 min-h-0"
+            style={{ width: undefined }}
+            data-dock-wrap
+          >
+            {/* alça de redimensionamento (desktop) */}
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Redimensionar painel lateral"
+              tabIndex={0}
+              onMouseDown={(e) => {
+                dockDragRef.current = { startX: e.clientX, startW: dockWidth };
+                document.body.style.cursor = "col-resize";
+                e.preventDefault();
+              }}
+              onDoubleClick={() => {
+                setDockWidth(DOCK_DEFAULT);
+                try { localStorage.setItem(DOCK_WIDTH_KEY, String(DOCK_DEFAULT)); } catch { /* ignore */ }
+              }}
+              className="hidden lg:block absolute top-0 left-0 h-full w-1.5 -ml-0.5 cursor-col-resize z-20 group"
+              title="Arraste para redimensionar · duplo clique restaura"
+            >
+              <div className="h-full w-full bg-transparent group-hover:bg-orange-500/40 transition-colors" />
+            </div>
+            <div className="h-full w-full" style={{ width: "100%" }} data-dock-inner>
+              {project && (
+                <CopilotDock
+                  tab={tab}
+                  onTabChange={setTab}
+                  history={history}
+                  sending={sending}
+                  onSend={(t, a) => void sendRequest(t, a)}
+                  project={project}
+                  projectKey={`${projectState!.revision}:${projectState!.hash.slice(0, 8)}`}
+                  onPreviewCandidate={previewCandidate}
+                  selectedElement={selectedElement}
+                  activeProviderLabel={providerLabel}
+                  onOpenProviders={() => setProviderModalOpen(true)}
+                  onOpenJsonTab={() => setTab("json")}
+                  onAppliedCandidate={() => void refresh()}
+                  selectedId={selectedId}
+                  onSelect={setSelectedId}
+                  hiddenIds={hiddenIds}
+                  onToggleHidden={toggleHidden}
+                  onIsolateGroup={isolateGroup}
+                  isolatedGroup={isolatedGroup}
+                  onFocusElement={focusElement}
+                  candidateDoc={candidate?.project ?? null}
+                  comparingRev={comparingRev}
+                  onCompareRevision={(rev) => void compareRevision(rev)}
+                  historyRefreshKey={historyRefreshKey}
+                  onRevisionRestored={() => void refresh()}
+                />
+              )}
+            </div>
           </div>
         </main>
 

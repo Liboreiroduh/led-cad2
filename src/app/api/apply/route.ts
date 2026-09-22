@@ -10,6 +10,7 @@ export async function POST(req: Request) {
       candidate?: unknown;
       base_revision?: number;
       base_hash?: string;
+      origin?: "ai" | "json";
     }>(req);
     if (!body?.candidate) return ok({ error: { type: "bad_request", message: "campo 'candidate' obrigatório" } }, 400);
 
@@ -28,7 +29,9 @@ export async function POST(req: Request) {
       throw new ConflictError();
     }
 
-    const state = store.applyCandidate(parsed.project, store.state.revision, store.state.hash);
+    const revSource = body.origin === "json" ? "manual_json" : "ai_apply";
+    const note = revSource === "manual_json" ? "aplicado pelo editor JSON" : "candidato da IA aplicado";
+    const state = store.applyCandidate(parsed.project, store.state.revision, store.state.hash, revSource, note);
     return ok({
       revision: state.revision,
       hash: state.hash,

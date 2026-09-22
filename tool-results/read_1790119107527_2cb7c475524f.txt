@@ -1,0 +1,759 @@
+     1→"use client";
+     2→
+     3→/**
+     4→ * LED JSON CAD — página principal.
+     5→ * JSON do projeto é a autoridade; canvas é visualização; IA transforma documentos;
+     6→ * diff calculado pelo sistema; preview antes de apply; undo por snapshot.
+     7→ */
+     8→import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+     9→import dynamic from "next/dynamic";
+    10→import { AnimatePresence, motion } from "framer-motion";
+    11→import { Button } from "@/components/ui/button";
+    12→import { Badge } from "@/components/ui/badge";
+    13→import { TooltipProvider } from "@/components/ui/tooltip";
+    14→import {
+    15→  FilePlus2, Upload, Undo2, FileSpreadsheet, FileDown, PlugZap, Loader2, X, Lock, RefreshCw,
+    16→  Camera, Keyboard, Layers3,
+    17→} from "lucide-react";
+    18→import { toast } from "sonner";
+    19→import Viewer3D from "@/components/cad/Viewer3D";
+    20→import { CopilotDock, type DockTab } from "@/components/cad/CopilotDock";
+    21→import { ProviderModal } from "@/components/cad/ProviderModal";
+    22→import { BomDialog } from "@/components/cad/BomDialog";
+    23→import { VIEW_LABELS, VIEWS, type StatusMap, type ViewMode } from "@/components/cad/sceneBuilder";
+    24→import { api, ApiCallError, type ProjectState, type TransformResult, type PreviewResult } from "@/lib/cad/client-api";
+    25→import type { ProjectDiff, ProjectDocument } from "@/lib/cad/schema";
+    26→import type { HistoryItem } from "@/components/cad/types";
+    27→
+    28→const Viewer3DNoSSR = dynamic(() => import("@/components/cad/Viewer3D"), {
+    29→  ssr: false,
+    30→  loading: () => (
+    31→    <div className="absolute inset-0 flex items-center justify-center bg-slate-100 text-slate-400 text-sm">
+    32→      <Loader2 className="h-6 w-6 animate-spin mr-2" /> carregando viewport 3D…
+    33→    </div>
+    34→  ),
+    35→});
+    36→
+    37→interface CandidateState {
+    38→  project: ProjectDocument;
+    39→  diff: ProjectDiff;
+    40→  diffSummary: string;
+    41→  baseRevision: number;
+    42→  baseHash: string;
+    43→  hash: string;
+    44→}
+    45→
+    46→const HISTORY_KEY = "led-json-cad:history:v1";
+    47→
+    48→const ERRORS_FRIENDLY: Record<string, string> = {
+    49→  provider_timeout: "O provider de IA excedeu o tempo limite. Tente novamente — se persistir, troque o modelo no Conector de IA.",
+    50→  invalid_json: "A IA devolveu um JSON fora do contrato após 2 tentativas. Reformule o pedido ou troque o provider.",
+    51→  invalid_schema: "A IA devolveu um documento inválido (perfis/geometry fora das regras). Detalhes no histórico.",
+    52→  not_configured: "Provider não configurado — abra o CONECTOR DE IA e informe a API key.",
+    53→  unsupported_attachment: "Este provider/modelo não suporta este tipo de anexo. Use um modelo vision (ex.: glm-4.5v).",
+    54→  project_changed: "O projeto mudou desde o preview — regenere o candidato.",
+    55→  network: "Falha de rede ao contatar o servidor.",
+    56→};
+    57→
+    58→export default function Home() {
+    59→  const [projectState, setProjectState] = useState<ProjectState | null>(null);
+    60→  const [candidate, setCandidate] = useState<CandidateState | null>(null);
+    61→  const [history, setHistory] = useState<HistoryItem[]>([]);
+    62→  const [sending, setSending] = useState(false);
+    63→  const [selectedId, setSelectedId] = useState<string | null>(null);
+    64→  const [viewMode, setViewMode] = useState<ViewMode>("iso");
+    65→  const [tab, setTab] = useState<DockTab>("copiloto");
+    66→  const [providerModalOpen, setProviderModalOpen] = useState(false);
+    67→  const [bomOpen, setBomOpen] = useState(false);
+    68→  const [providerLabel, setProviderLabel] = useState("carregando…");
+    69→  const [pdfBusy, setPdfBusy] = useState(false);
+    70→  const importFileRef = useRef<HTMLInputElement>(null);
+    71→  const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
+    72→  const [isolatedGroup, setIsolatedGroup] = useState<string | null>(null);
+    73→  const [focusRequest, setFocusRequest] = useState<{ id: string; nonce: number } | null>(null);
+    74→  const [snapshotSignal, setSnapshotSignal] = useState(0);
+    75→  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+    76→
+    77→  const pushHistory = useCallback((item: Omit<HistoryItem, "id" | "ts">) => {
+    78→    setHistory((h) => [
+    79→      ...h.slice(-59),
+    80→      { ...item, id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ts: new Date().toISOString() },
+    81→    ]);
+    82→  }, []);
+    83→
+    84→  // restaura histórico do localStorage
+    85→  useEffect(() => {
+    86→    try {
+    87→      const raw = localStorage.getItem(HISTORY_KEY);
+    88→      if (raw) setHistory(JSON.parse(raw) as HistoryItem[]);
+    89→    } catch {
+    90→      // ignora storage corrompido
+    91→    }
+    92→  }, []);
+    93→
+    94→  const refresh = useCallback(async () => {
+    95→    try {
+    96→      const st = await api.getProject();
+    97→      setProjectState(st);
+    98→    } catch (e) {
+    99→      toast.error((e as ApiCallError).message);
+   100→    }
+   101→  }, []);
+   102→
+   103→  useEffect(() => {
+   104→    void refresh();
+   105→    void api
+   106→      .meta()
+   107→      .then((m) => {
+   108→        const active = m.providers.find((p) => p.active) ?? m.providers[0];
+   109→        setProviderLabel(`${active?.label ?? "mock"} · ${active?.current_model ?? ""}`);
+   110→      })
+   111→      .catch(() => setProviderLabel("mock · mock-transformer-v1"));
+   112→  }, [refresh]);
+   113→
+   114→  // Ctrl+Z → undo atômico; 1–7 → vistas; Esc → desselecionar
+   115→  useEffect(() => {
+   116→    const onKey = (e: KeyboardEvent) => {
+   117→      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+   118→        e.preventDefault();
+   119→        void doUndo();
+   120→        return;
+   121→      }
+   122→      if (e.key === "Escape") {
+   123→        setSelectedId(null);
+   124→        return;
+   125→      }
+   126→      const target = e.target as HTMLElement | null;
+   127→      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+   128→      const viewKeys = ["1", "2", "3", "4", "5", "6", "7"];
+   129→      const idx = viewKeys.indexOf(e.key);
+   130→      if (idx >= 0) setViewMode(VIEWS[idx]);
+   131→    };
+   132→    window.addEventListener("keydown", onKey);
+   133→    return () => window.removeEventListener("keydown", onKey);
+   134→  }, []);
+   135→
+   136→  const doUndo = useCallback(async () => {
+   137→    try {
+   138→      const st = await api.undo();
+   139→      setProjectState(st);
+   140→      setCandidate(null);
+   141→      pushHistory({ role: "info", text: st.message ?? "desfeito" });
+   142→      toast.success("Desfeito — JSON anterior restaurado");
+   143→    } catch (e) {
+   144→      const err = e as ApiCallError;
+   145→      if (err.payload?.type === "nothing_to_undo") toast.info("Nada para desfazer");
+   146→      else toast.error(err.payload?.message ?? err.message);
+   147→    }
+   148→  }, [pushHistory]);
+   149→
+   150→  // ---------- transform via IA ----------
+   151→  const sendRequest = useCallback(
+   152→    async (text: string, attachments: Array<{ type: "image"; name: string; data_url: string }>) => {
+   153→      if (!projectState) return;
+   154→      pushHistory({ role: "user", text });
+   155→      setSending(true);
+   156→      setCandidate(null);
+   157→      try {
+   158→        const r: TransformResult = await api.transform({
+   159→          request: text,
+   160→          base_revision: projectState.revision,
+   161→          base_hash: projectState.hash,
+   162→          attachments,
+   163→        });
+   164→        if (r.status === "ready" && r.candidate_project) {
+   165→          setCandidate({
+   166→            project: r.candidate_project,
+   167→            diff: (r.diff ?? { added: [], removed: [], modified: [], counts: { added: 0, removed: 0, modified: 0, total: 0 }, panel_changed: false, info_changed: false }),
+   168→            diffSummary: r.diff_summary ?? "",
+   169→            baseRevision: r.base_revision,
+   170→            baseHash: r.base_hash,
+   171→            hash: r.candidate_hash,
+   172→          });
+   173→          pushHistory({
+   174→            role: "assistant",
+   175→            text: r.explain,
+   176→            meta: {
+   177→              status: "ready",
+   178→              explain: r.explain,
+   179→              assumptions: r.assumptions,
+   180→              questions: r.questions,
+   181→              diffSummary: r.diff_summary,
+   182→              provider: r.meta.provider,
+   183→              model: r.meta.model,
+   184→              latency: r.meta.latency_ms,
+   185→              candidate: r.candidate_project,
+   186→            },
+   187→          });
+   188→        } else {
+   189→          pushHistory({
+   190→            role: "assistant",
+   191→            text: r.explain,
+   192→            meta: {
+   193→              status: "needs_input",
+   194→              explain: r.explain,
+   195→              questions: r.questions,
+   196→              assumptions: r.assumptions,
+   197→              provider: r.meta.provider,
+   198→              model: r.meta.model,
+   199→              latency: r.meta.latency_ms,
+   200→            },
+   201→          });
+   202→        }
+   203→      } catch (e) {
+   204→        const err = e as ApiCallError;
+   205→        const payload = err.payload;
+   206→        pushHistory({
+   207→          role: "error",
+   208→          text: ERRORS_FRIENDLY[payload?.type ?? ""] ?? payload?.message ?? err.message,
+   209→          meta: { errorType: payload?.type ?? "error" },
+   210→        });
+   211→      } finally {
+   212→        setSending(false);
+   213→      }
+   214→    },
+   215→    [projectState, pushHistory],
+   216→  );
+   217→
+   218→  // ---------- preview de candidato (JSON tab / validação) ----------
+   219→  const previewCandidate = useCallback(
+   220→    async (doc: ProjectDocument): Promise<PreviewResult> => {
+   221→      try {
+   222→        const r = await api.preview(doc);
+   223→        if (r.ok && r.diff && projectState) {
+   224→          setCandidate({
+   225→            project: doc,
+   226→            diff: r.diff,
+   227→            diffSummary: r.diff_summary ?? "",
+   228→            baseRevision: r.base_revision ?? projectState.revision,
+   229→            baseHash: r.base_hash ?? projectState.hash,
+   230→            hash: r.candidate_hash ?? "",
+   231→          });
+   232→          pushHistory({ role: "info", text: `JSON validado — ${r.diff_summary}. Revise o preview 3D e aplique.` });
+   233→        }
+   234→        return r;
+   235→      } catch (e) {
+   236→        const err = e as ApiCallError;
+   237→        toast.error(err.payload?.message ?? err.message);
+   238→        return { ok: false, errors: [{ path: "preview", message: err.message }] };
+   239→      }
+   240→    },
+   241→    [projectState, pushHistory],
+   242→  );
+   243→
+   244→  const applyCandidate = useCallback(async () => {
+   245→    if (!candidate) return;
+   246→    try {
+   247→      const st = await api.apply({
+   248→        candidate: candidate.project,
+   249→        base_revision: candidate.baseRevision,
+   250→        base_hash: candidate.baseHash,
+   251→      });
+   252→      setProjectState(st);
+   253→      setCandidate(null);
+   254→      setHistory((h) =>
+   255→        h.map((item) =>
+   256→          item.role === "assistant" && item.meta?.candidate && !item.meta.applied
+   257→            ? { ...item, meta: { ...item.meta, applied: true } }
+   258→            : item,
+   259→        ),
+   260→      );
+   261→      pushHistory({ role: "info", text: `Candidato aplicado — revision ${st.revision}.` });
+   262→      toast.success(`Aplicado — revision ${st.revision}`);
+   263→    } catch (e) {
+   264→      const err = e as ApiCallError;
+   265→      if (err.status === 409) {
+   266→        toast.error("O projeto mudou desde o preview — regenere o candidato.");
+   267→        setCandidate(null);
+   268→        void refresh();
+   269→      } else {
+   270→        toast.error(err.payload?.message ?? err.message);
+   271→      }
+   272→    }
+   273→  }, [candidate, pushHistory, refresh]);
+   274→
+   275→  // ---------- status maps para o viewer ----------
+   276→  const { statuses, candidateStatuses } = useMemo((): { statuses: StatusMap; candidateStatuses: StatusMap } => {
+   277→    if (!projectState) return { statuses: {}, candidateStatuses: {} };
+   278→    if (!candidate) return { statuses: {}, candidateStatuses: {} };
+   279→    const oldIds = new Set(projectState.project.elements.map((e) => e.id));
+   280→    const newIds = new Set(candidate.project.elements.map((e) => e.id));
+   281→    const modified = new Set(candidate.diff.modified);
+   282→    const added = new Set(candidate.diff.added);
+   283→    const removed = new Set(candidate.diff.removed);
+   284→    const sOld: StatusMap = {};
+   285→    for (const id of oldIds) {
+   286→      sOld[id] = removed.has(id) ? "removed" : modified.has(id) ? "modified" : "unchanged";
+   287→    }
+   288→    const sNew: StatusMap = {};
+   289→    for (const id of newIds) {
+   290→      sNew[id] = added.has(id) ? "added" : modified.has(id) ? "modified" : "unchanged";
+   291→    }
+   292→    return { statuses: sOld, candidateStatuses: sNew };
+   293→  }, [projectState, candidate]);
+   294→
+   295→  const selectedElement = useMemo(() => {
+   296→    const doc = candidate?.project ?? projectState?.project;
+   297→    return doc?.elements.find((e) => e.id === selectedId) ?? null;
+   298→  }, [projectState, candidate, selectedId]);
+   299→
+   300→  const actions = {
+   301→    newProject: async () => {
+   302→      try {
+   303→        const st = await api.newProject();
+   304→        setProjectState(st);
+   305→        setCandidate(null);
+   306→        pushHistory({ role: "info", text: "Novo projeto em branco criado." });
+   307→      } catch (e) {
+   308→        toast.error((e as ApiCallError).message);
+   309→      }
+   310→    },
+   311→    importJson: async (file: File) => {
+   312→      try {
+   313→        const text = await file.text();
+   314→        const doc = JSON.parse(text);
+   315→        const st = await api.importProject(doc);
+   316→        setProjectState(st);
+   317→        setCandidate(null);
+   318→        pushHistory({ role: "info", text: "JSON importado e validado." });
+   319→        toast.success("Projeto importado");
+   320→      } catch (e) {
+   321→        toast.error((e as ApiCallError).payload?.message ?? (e as Error).message);
+   322→      }
+   323→    },
+   324→    exportPdf: async () => {
+   325→      setPdfBusy(true);
+   326→      try {
+   327→        await api.downloadPdf();
+   328→        toast.success("PDF gerado");
+   329→      } catch (e) {
+   330→        toast.error((e as ApiCallError).payload?.message ?? (e as Error).message);
+   331→      } finally {
+   332→        setPdfBusy(false);
+   333→      }
+   334→    },
+   335→  };
+   336→
+   337→  // persiste histórico (sem candidatos antigos pesados)
+   338→  useEffect(() => {
+   339→    try {
+   340→      const slim = history.slice(-30).map((h) => ({
+   341→        ...h,
+   342→        meta: h.meta?.candidate ? { ...h.meta, candidate: null } : h.meta,
+   343→      }));
+   344→      localStorage.setItem(HISTORY_KEY, JSON.stringify(slim));
+   345→    } catch {
+   346→      // quota — ignora
+   347→    }
+   348→  }, [history]);
+   349→
+   350→  const toggleHidden = useCallback((id: string) => {
+   351→    setHiddenIds((s) => {
+   352→      const n = new Set(s);
+   353→      if (n.has(id)) n.delete(id);
+   354→      else n.add(id);
+   355→      return n;
+   356→    });
+   357→  }, []);
+   358→
+   359→  const isolateGroup = useCallback((group: string | null) => {
+   360→    setIsolatedGroup(group);
+   361→    if (!projectState) return;
+   362→    const doc = candidate?.project ?? projectState.project;
+   363→    if (group === null) {
+   364→      setHiddenIds(new Set());
+   365→    } else {
+   366→      setHiddenIds(new Set(doc.elements.filter((e) => e.group !== group).map((e) => e.id)));
+   367→    }
+   368→  }, [projectState, candidate]);
+   369→
+   370→  const focusElement = useCallback((id: string) => {
+   371→    setSelectedId(id);
+   372→    setFocusRequest({ id, nonce: Date.now() });
+   373→  }, []);
+   374→
+   375→  const fitKey = `${projectState?.revision ?? 0}:${projectState?.hash?.slice(0, 8) ?? ""}:${candidate?.hash.slice(0, 8) ?? "none"}`;
+   376→  const project = projectState?.project;
+   377→
+   378→  return (
+   379→    <TooltipProvider>
+   380→      <div className="h-screen flex flex-col bg-slate-100 text-slate-900">
+   381→        {/* ---------- TOPBAR ---------- */}
+   382→        <header className="flex items-center gap-2 px-3 sm:px-4 h-14 bg-[#1b2836] text-slate-100 shrink-0 border-b-4 border-orange-600" role="banner">
+   383→          <div className="flex items-center gap-2.5 min-w-0">
+   384→            <div className="h-8 w-8 rounded bg-orange-600 grid place-items-center font-black text-white text-sm shrink-0" aria-hidden>
+   385→              LC
+   386→            </div>
+   387→            <div className="leading-tight min-w-0">
+   388→              <div className="font-bold text-sm tracking-wide truncate">LED JSON CAD</div>
+   389→              <div className="text-[10px] text-slate-400 truncate">documento JSON · mm · Z solo</div>
+   390→            </div>
+   391→          </div>
+   392→
+   393→          {project && (
+   394→            <div className="hidden md:flex items-center gap-2 ml-4 min-w-0">
+   395→              <span className="text-sm font-medium truncate max-w-56" title={project.project.name}>
+   396→                {project.project.name}
+   397→              </span>
+   398→              <Badge variant="outline" className="text-slate-300 border-slate-500">
+   399→                rev {projectState!.revision}
+   400→              </Badge>
+   401→              <Badge variant="outline" className="text-slate-400 border-slate-600 font-mono text-[10px]">
+   402→                {projectState!.hash.slice(0, 8)}
+   403→              </Badge>
+   404→              <Badge variant="outline" className="text-slate-400 border-slate-600">
+   405→                {project.elements.length} el.
+   406→              </Badge>
+   407→            </div>
+   408→          )}
+   409→
+   410→          <div className="ml-auto flex items-center gap-1.5">
+   411→            <input
+   412→              ref={importFileRef}
+   413→              type="file"
+   414→              accept=".json,application/json"
+   415→              hidden
+   416→              onChange={(e) => {
+   417→                const f = e.target.files?.[0];
+   418→                if (f) void actions.importJson(f);
+   419→                e.target.value = "";
+   420→              }}
+   421→            />
+   422→            <TopBtn icon={<FilePlus2 className="h-4 w-4" />} label="NOVO" onClick={() => void actions.newProject()} />
+   423→            <TopBtn icon={<Upload className="h-4 w-4" />} label="IMPORTAR" onClick={() => importFileRef.current?.click()} />
+   424→            <TopBtn icon={<Undo2 className="h-4 w-4" />} label="DESFAZER" onClick={() => void doUndo()} title="Ctrl+Z" />
+   425→            <TopBtn icon={<FileSpreadsheet className="h-4 w-4" />} label="BOM" onClick={() => setBomOpen(true)} />
+   426→            <TopBtn
+   427→              icon={pdfBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+   428→              label="PDF"
+   429→              onClick={() => void actions.exportPdf()}
+   430→              disabled={pdfBusy}
+   431→            />
+   432→            <TopBtn icon={<PlugZap className="h-4 w-4" />} label="IA" onClick={() => setProviderModalOpen(true)} highlight />
+   433→          </div>
+   434→        </header>
+   435→
+   436→        {/* ---------- MAIN ---------- */}
+   437→        <main className="flex-1 flex flex-col lg:flex-row min-h-0" role="main">
+   438→          {/* VIEWPORT */}
+   439→          <section className="relative flex-1 min-h-[45vh] lg:min-h-0 bg-slate-100" aria-label="Viewport 3D">
+   440→            {project ? (
+   441→              <Viewer3DNoSSR
+   442→                project={project}
+   443→                candidate={candidate?.project ?? null}
+   444→                statuses={statuses}
+   445→                candidateStatuses={candidateStatuses}
+   446→                selectedId={selectedId}
+   447→                onSelect={setSelectedId}
+   448→                viewMode={viewMode}
+   449→                fitKey={fitKey}
+   450→                hiddenIds={hiddenIds}
+   451→                focusRequest={focusRequest}
+   452→                snapshotSignal={snapshotSignal}
+   453→              />
+   454→            ) : (
+   455→              <div className="absolute inset-0 grid place-items-center text-slate-400">
+   456→                <Loader2 className="h-8 w-8 animate-spin" />
+   457→              </div>
+   458→            )}
+   459→
+   460→            {/* vistas — linha única com scroll em telas pequenas + atalhos */}
+   461→            <div className="absolute top-2.5 left-1/2 -translate-x-1/2 max-w-[95%] flex items-center gap-1" role="toolbar" aria-label="Vistas da câmera">
+   462→              <div className="flex items-center gap-0.5 bg-white/90 backdrop-blur rounded-full px-1.5 py-1 shadow-md border border-slate-200 overflow-x-auto cad-scroll max-w-full">
+   463→                {VIEWS.map((v, i) => (
+   464→                  <button
+   465→                    key={v}
+   466→                    onClick={() => setViewMode(v)}
+   467→                    title={`${VIEW_LABELS[v]} (${i + 1})`}
+   468→                    className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap transition-colors ${
+   469→                      viewMode === v ? "bg-orange-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-200"
+   470→                    }`}
+   471→                    aria-pressed={viewMode === v}
+   472→                  >
+   473→                    {VIEW_LABELS[v]}
+   474→                  </button>
+   475→                ))}
+   476→              </div>
+   477→              <button
+   478→                onClick={() => setSnapshotSignal((n) => n + 1)}
+   479→                title="Exportar PNG do viewport"
+   480→                aria-label="Exportar PNG do viewport"
+   481→                className="h-8 w-8 grid place-items-center rounded-full bg-white/90 backdrop-blur shadow-md border border-slate-200 text-slate-600 hover:text-orange-600 hover:border-orange-300 transition-colors shrink-0"
+   482→              >
+   483→                <Camera className="h-4 w-4" />
+   484→              </button>
+   485→              <button
+   486→                onClick={() => setShortcutsOpen((o) => !o)}
+   487→                title="Atalhos de teclado"
+   488→                aria-label="Atalhos de teclado"
+   489→                className={`h-8 w-8 grid place-items-center rounded-full shadow-md border transition-colors shrink-0 ${
+   490→                  shortcutsOpen ? "bg-orange-600 border-orange-600 text-white" : "bg-white/90 border-slate-200 text-slate-600 hover:text-orange-600 hover:border-orange-300"
+   491→                }`}
+   492→              >
+   493→                <Keyboard className="h-4 w-4" />
+   494→              </button>
+   495→            </div>
+   496→
+   497→            {/* popover de atalhos */}
+   498→            <AnimatePresence>
+   499→              {shortcutsOpen && (
+   500→                <motion.div
+   501→                  initial={{ opacity: 0, y: -6, scale: 0.97 }}
+   502→                  animate={{ opacity: 1, y: 0, scale: 1 }}
+   503→                  exit={{ opacity: 0, y: -6, scale: 0.97 }}
+   504→                  transition={{ duration: 0.15 }}
+   505→                  className="absolute top-12 right-3 w-64 bg-white/95 backdrop-blur border border-slate-200 shadow-xl rounded-xl p-3 z-10"
+   506→                  role="dialog"
+   507→                  aria-label="Atalhos de teclado"
+   508→                >
+   509→                  <div className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+   510→                    <Keyboard className="h-3.5 w-3.5 text-orange-600" /> ATALHOS
+   511→                  </div>
+   512→                  <ul className="text-[11px] text-slate-600 space-y-1.5">
+   513→                    {[...Array(7)].map((_, i) => (
+   514→                      <li key={i} className="flex items-center justify-between">
+   515→                        <span>{VIEW_LABELS[VIEWS[i]]}</span>
+   516→                        <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">{i + 1}</kbd>
+   517→                      </li>
+   518→                    ))}
+   519→                    <li className="flex items-center justify-between">
+   520→                      <span>Desfazer</span>
+   521→                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Ctrl+Z</kbd>
+   522→                    </li>
+   523→                    <li className="flex items-center justify-between">
+   524→                      <span>Desselecionar</span>
+   525→                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Esc</kbd>
+   526→                    </li>
+   527→                    <li className="flex items-center justify-between">
+   528→                      <span>Enviar pedido</span>
+   529→                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Enter</kbd>
+   530→                    </li>
+   531→                  </ul>
+   532→                </motion.div>
+   533→              )}
+   534→            </AnimatePresence>
+   535→
+   536→            {/* badge grupo isolado */}
+   537→            {isolatedGroup && (
+   538→              <motion.button
+   539→                initial={{ opacity: 0, scale: 0.9 }}
+   540→                animate={{ opacity: 1, scale: 1 }}
+   541→                onClick={() => isolateGroup(null)}
+   542→                className="absolute top-12 left-3 flex items-center gap-1.5 bg-orange-600 text-white text-[11px] font-bold px-2.5 py-1 rounded-full shadow-lg"
+   543→                title="remover isolamento"
+   544→              >
+   545→                <Layers3 className="h-3 w-3" /> ISOLADO: {isolatedGroup} ×
+   546→              </motion.button>
+   547→            )}
+   548→
+   549→            {/* info do elemento selecionado */}
+   550→            {selectedElement && (
+   551→              <div className="absolute top-2.5 left-2.5 bg-white/95 border border-slate-200 shadow rounded-lg p-3 text-xs max-w-64" role="status">
+   552→                <div className="flex items-center justify-between mb-1.5">
+   553→                  <span className="font-bold text-orange-700">{selectedElement.id}</span>
+   554→                  <button onClick={() => setSelectedId(null)} aria-label="Fechar info do elemento" className="text-slate-400 hover:text-slate-700">
+   555→                    <X className="h-3.5 w-3.5" />
+   556→                  </button>
+   557→                </div>
+   558→                <div className="grid grid-cols-[64px_1fr] gap-x-2 gap-y-0.5 text-slate-600">
+   559→                  <span className="text-slate-400">tipo</span><span>{selectedElement.type}</span>
+   560→                  <span className="text-slate-400">role</span><span>{selectedElement.role}</span>
+   561→                  <span className="text-slate-400">grupo</span><span className="truncate">{selectedElement.group}</span>
+   562→                  {selectedElement.type === "beam" && (
+   563→                    <>
+   564→                      <span className="text-slate-400">perfil</span><span>{selectedElement.profile}</span>
+   565→                      <span className="text-slate-400">start</span><span className="font-mono text-[10px]">{fmtV(selectedElement.start)}</span>
+   566→                      <span className="text-slate-400">end</span><span className="font-mono text-[10px]">{fmtV(selectedElement.end)}</span>
+   567→                    </>
+   568→                  )}
+   569→                  {selectedElement.type === "plate" && (
+   570→                    <><span className="text-slate-400">size</span><span className="font-mono text-[10px]">{selectedElement.size_x}×{selectedElement.size_y}×{selectedElement.size_z}</span></>
+   571→                  )}
+   572→                  {selectedElement.type === "cable" && (
+   573→                    <><span className="text-slate-400">Ø</span><span>{selectedElement.diameter} mm</span></>
+   574→                  )}
+   575→                </div>
+   576→              </div>
+   577→            )}
+   578→
+   579→            {/* legenda de diff */}
+   580→            {candidate && (
+   581→              <motion.div
+   582→                initial={{ opacity: 0, y: 8 }}
+   583→                animate={{ opacity: 1, y: 0 }}
+   584→                className="absolute bottom-2.5 left-2.5 bg-white/90 backdrop-blur border border-slate-200 rounded-lg px-3 py-2 text-[11px] space-y-1 shadow-md"
+   585→              >
+   586→                <Legend color="#16a34a" label={`adicionadas (${candidate.diff.counts.added})`} />
+   587→                <Legend color="#ea580c" label={`editadas (${candidate.diff.counts.modified})`} />
+   588→                <Legend color="#dc2626" label={`removidas (${candidate.diff.counts.removed})`} />
+   589→                <Legend color="#64748b" label="inalteradas" />
+   590→              </motion.div>
+   591→            )}
+   592→
+   593→            {/* PREVIEW BAR */}
+   594→            <AnimatePresence>
+   595→              {candidate && (
+   596→                <motion.div
+   597→                  initial={{ opacity: 0, y: 24 }}
+   598→                  animate={{ opacity: 1, y: 0 }}
+   599→                  exit={{ opacity: 0, y: 24 }}
+   600→                  transition={{ type: "spring", stiffness: 320, damping: 28 }}
+   601→                  className="absolute bottom-3 left-1/2 -translate-x-1/2 w-[min(680px,92%)] bg-[#1b2836]/95 backdrop-blur text-white rounded-xl shadow-2xl border border-orange-500/60 px-4 py-2.5 flex flex-col sm:flex-row items-center gap-2"
+   602→                  role="alertdialog"
+   603→                  aria-label="Preview de alterações propostas"
+   604→                >
+   605→                  <div className="text-sm flex-1 min-w-0">
+   606→                    <span className="font-bold text-orange-400">{candidate.diff.counts.total} alterações propostas</span>
+   607→                    <span className="text-slate-300 text-xs ml-2 hidden sm:inline truncate">
+   608→                      {candidate.diff.counts.added} novas · {candidate.diff.counts.modified} editadas · {candidate.diff.counts.removed} removidas
+   609→                      {candidate.diff.panel_changed ? " · painel alterado" : ""}
+   610→                    </span>
+   611→                  </div>
+   612→                  <div className="flex gap-2">
+   613→                    <Button size="sm" onClick={() => void applyCandidate()} className="bg-green-600 hover:bg-green-700 text-white font-bold px-5 shadow-lg shadow-green-900/40">
+   614→                      APLICAR
+   615→                    </Button>
+   616→                    <Button
+   617→                      size="sm"
+   618→                      variant="outline"
+   619→                      onClick={() => {
+   620→                        setCandidate(null);
+   621→                        pushHistory({ role: "info", text: "Preview cancelado — documento atual preservado." });
+   622→                      }}
+   623→                      className="border-slate-500 text-slate-200 hover:bg-slate-700"
+   624→                    >
+   625→                      CANCELAR
+   626→                    </Button>
+   627→                  </div>
+   628→                </motion.div>
+   629→              )}
+   630→            </AnimatePresence>
+   631→          </section>
+   632→
+   633→          {/* DOCK */}
+   634→          <div className="h-[46vh] lg:h-auto lg:w-[390px] xl:w-[420px] shrink-0 min-h-0">
+   635→            {project && (
+   636→              <CopilotDock
+   637→                tab={tab}
+   638→                onTabChange={setTab}
+   639→                history={history}
+   640→                sending={sending}
+   641→                onSend={(t, a) => void sendRequest(t, a)}
+   642→                project={project}
+   643→                projectKey={`${projectState!.revision}:${projectState!.hash.slice(0, 8)}`}
+   644→                onPreviewCandidate={previewCandidate}
+   645→                selectedElement={selectedElement}
+   646→                activeProviderLabel={providerLabel}
+   647→                onOpenProviders={() => setProviderModalOpen(true)}
+   648→                onOpenJsonTab={() => setTab("json")}
+   649→                onAppliedCandidate={() => void refresh()}
+   650→                selectedId={selectedId}
+   651→                onSelect={setSelectedId}
+   652→                hiddenIds={hiddenIds}
+   653→                onToggleHidden={toggleHidden}
+   654→                onIsolateGroup={isolateGroup}
+   655→                isolatedGroup={isolatedGroup}
+   656→                onFocusElement={focusElement}
+   657→                candidateDoc={candidate?.project ?? null}
+   658→              />
+   659→            )}
+   660→          </div>
+   661→        </main>
+   662→
+   663→        {/* ---------- FOOTER (status) ---------- */}
+   664→        <footer className="h-7 shrink-0 bg-[#141f2b] text-slate-400 text-[11px] flex items-center gap-3 px-3 overflow-hidden" role="contentinfo">
+   665→          <span className="text-orange-500 font-semibold shrink-0">LED Collor</span>
+   666→          <span className="hidden sm:inline truncate">JSON do projeto é a fonte de verdade · canvas é visualização · PDF/BOM derivados</span>
+   667→          <span className="ml-auto flex items-center gap-2 shrink-0">
+   668→            {candidate && <span className="text-orange-400 font-semibold">PREVIEW ATIVO</span>}
+   669→            {isolatedGroup && <span className="text-amber-400 hidden md:inline">isolando {isolatedGroup}</span>}
+   670→            <span className="hidden lg:inline">
+   671→              {project?.elements.length ?? 0} el. · {new Set((project?.elements ?? []).map((e) => e.group)).size} grupos
+   672→            </span>
+   673→            <Lock className="h-3 w-3" aria-hidden />
+   674→            <span>unidade: mm</span>
+   675→            <span className="hidden md:inline font-mono">{projectState?.hash.slice(0, 8) ?? "—"}</span>
+   676→            <button
+   677→              onClick={() => {
+   678→                void refresh();
+   679→                void api
+   680→                  .meta()
+   681→                  .then((m) => {
+   682→                    const active = m.providers.find((p) => p.active) ?? m.providers[0];
+   683→                    setProviderLabel(`${active?.label ?? "mock"} · ${active?.current_model ?? ""}`);
+   684→                  })
+   685→                  .catch(() => undefined);
+   686→              }}
+   687→              title="Atualizar status"
+   688→              className="hover:text-white"
+   689→              aria-label="Atualizar status"
+   690→            >
+   691→              <RefreshCw className="h-3 w-3" />
+   692→            </button>
+   693→          </span>
+   694→        </footer>
+   695→
+   696→        <ProviderModal
+   697→          open={providerModalOpen}
+   698→          onOpenChange={setProviderModalOpen}
+   699→          onActivated={() => {
+   700→            void api
+   701→              .meta()
+   702→              .then((m) => {
+   703→                const active = m.providers.find((p) => p.active) ?? m.providers[0];
+   704→                setProviderLabel(`${active?.label ?? "mock"} · ${active?.current_model ?? ""}`);
+   705→              })
+   706→              .catch(() => undefined);
+   707→          }}
+   708→        />
+   709→        <BomDialog open={bomOpen} onOpenChange={setBomOpen} />
+   710→      </div>
+   711→    </TooltipProvider>
+   712→  );
+   713→}
+   714→
+   715→function TopBtn({
+   716→  icon,
+   717→  label,
+   718→  onClick,
+   719→  title,
+   720→  disabled,
+   721→  highlight,
+   722→}: {
+   723→  icon: React.ReactNode;
+   724→  label: string;
+   725→  onClick: () => void;
+   726→  title?: string;
+   727→  disabled?: boolean;
+   728→  highlight?: boolean;
+   729→}) {
+   730→  return (
+   731→    <Button
+   732→      size="sm"
+   733→      variant="ghost"
+   734→      onClick={onClick}
+   735→      disabled={disabled}
+   736→      title={title ?? label}
+   737→      className={`h-9 px-2 sm:px-2.5 text-[10px] sm:text-[11px] font-semibold gap-1 ${
+   738→        highlight ? "text-orange-400 hover:text-orange-300 hover:bg-slate-700" : "text-slate-200 hover:text-white hover:bg-slate-700"
+   739→      }`}
+   740→    >
+   741→      {icon}
+   742→      <span className="hidden sm:inline">{label}</span>
+   743→    </Button>
+   744→  );
+   745→}
+   746→
+   747→function Legend({ color, label }: { color: string; label: string }) {
+   748→  return (
+   749→    <div className="flex items-center gap-1.5 text-slate-600">
+   750→      <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: color }} aria-hidden />
+   751→      {label}
+   752→    </div>
+   753→  );
+   754→}
+   755→
+   756→function fmtV(v: { x: number; y: number; z: number }): string {
+   757→  return `(${Math.round(v.x)}, ${Math.round(v.y)}, ${Math.round(v.z)})`;
+   758→}
+   759→

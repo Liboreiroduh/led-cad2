@@ -13,15 +13,16 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   Send, Paperclip, Copy, CheckCircle2, AlertTriangle, Info, FileJson,
-  Save, Loader2, RotateCcw, Download, Upload, Braces, Sparkles, Trash2, Move, Replace, CopyPlus, ListTree,
+  Save, Loader2, RotateCcw, Download, Upload, Braces, Sparkles, Trash2, Move, Replace, CopyPlus, ListTree, History,
 } from "lucide-react";
 import { api, ApiCallError } from "@/lib/cad/client-api";
 import type { Assumption, ProjectDocument, ProjectDiff } from "@/lib/cad/schema";
 import type { HistoryItem } from "./types";
 import { ElementBrowser } from "./ElementBrowser";
+import { RevisionHistory } from "./RevisionHistory";
 import { toast } from "sonner";
 
-export type DockTab = "copiloto" | "json" | "presets" | "elementos";
+export type DockTab = "copiloto" | "json" | "presets" | "elementos" | "historico";
 
 interface CopilotDockProps {
   tab: DockTab;
@@ -46,6 +47,11 @@ interface CopilotDockProps {
   isolatedGroup: string | null;
   onFocusElement: (id: string) => void;
   candidateDoc: ProjectDocument | null;
+  /** histórico de revisões */
+  comparingRev: number | null;
+  onCompareRevision: (rev: number) => void;
+  historyRefreshKey: number;
+  onRevisionRestored: () => void;
 }
 
 function assumptionText(a: Assumption): string {
@@ -63,6 +69,7 @@ export function CopilotDock(props: CopilotDockProps) {
             ["json", "JSON", <Braces key="i" className="h-3.5 w-3.5" />],
             ["presets", "Presets", <FileJson key="i" className="h-3.5 w-3.5" />],
             ["elementos", "Elem.", <ListTree key="i" className="h-3.5 w-3.5" />],
+            ["historico", "Hist.", <History key="i" className="h-3.5 w-3.5" />],
           ] as const
         ).map(([id, label, icon]) => (
           <button
@@ -83,6 +90,14 @@ export function CopilotDock(props: CopilotDockProps) {
       {tab === "copiloto" && <CopilotTab {...props} />}
       {tab === "json" && <JsonTab {...props} />}
       {tab === "presets" && <PresetsTab {...props} />}
+      {tab === "historico" && (
+        <RevisionHistory
+          comparingRev={props.comparingRev}
+          onCompare={props.onCompareRevision}
+          refreshKey={props.historyRefreshKey}
+          onRestored={props.onRevisionRestored}
+        />
+      )}
       {tab === "elementos" && (
         <ElementBrowser
           project={props.project}
