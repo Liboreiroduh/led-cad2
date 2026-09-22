@@ -68,3 +68,26 @@ Stage Summary:
 - Estado: rev 10 "Outdoor Rodovia BR-116", 31 el., provider Z.ai glm-4.5-flash ativo; 1 exemplo few-shot semeado (data/examples) para a próxima transformação real.
 - Definition of Done segue 21/21; histórico de revisões (que estava QUEBRADO em produção silenciosa) agora funcional de ponta a ponta.
 - Próximos passos sugeridos (prioridade): 1) transformação REAL com Z.ai usando o few-shot semeado para medir ganho de qualidade/latência (atenção: few-shot ~dobra tokens de entrada); 2) UI de gerenciamento de exemplos (listar/excluir data/examples); 3) covisão: teste end-to-end com croqui + glm-4.5v; 4) modo comparação lado-a-lado (split viewport) além do ghost; 5) exportar comparação de revisões como relatório PDF.
+
+---
+Task ID: cron-review-202609230733 (round 4)
+Agent: Z.ai Code (cron webDevReview)
+Task: Avaliar estado do projeto, QA via agent-browser, e evoluir com novas features + polish de styling.
+
+Work Log:
+- QA inicial: health 200 (rev 10), dev.log sem erros, HIST/ELEM/COPILOTO renderizam, git clean. Sem bugs bloqueantes → rodada de EVOLUÇÃO.
+- BUG/UI FIX — DiffInspector coberto pela PreviewBar em viewports estreitos (clique no botão DIFF caía na barra). Fix: posicionado acima da barra (bottom-[108px] mobile / bottom-[68px] sm, z-10).
+- FEATURE — Gerenciador de exemplos few-shot completo (ciclo de vida inteiro): store.deleteExample(id) com sanitização anti-path-traversal; nova rota DELETE /api/examples/[id]; novo componente ExamplesManager (seção colapsável "EXEMPLOS FEW-SHOT" no CopilotTab entre chips e input) com lista (pedido truncado, data pt-BR, elementos antes→depois, tamanho KB), badge de contagem, refresh manual, delete com confirmação em 2 cliques (3s de janela, fica vermelho) e estado vazio instrutivo. STORE_VERSION 3→4→5.
+- FIX — POST /api/examples retornava id com ".json" mas GET lista sem — inconsistentes. saveExample agora retorna id SEM extensão (bump v5 necessário porque o singleton em globalThis sobrevive ao HMR com método antigo).
+- FIX — botão "salvar como exemplo" sumia ao aplicar (condição m.candidate && !m.applied). Agora fica disponível com sufixo "· aplicada" — permite salvar o exemplo DEPOIS de validar o resultado aplicado.
+- FEATURE — DiffInspector: a legenda de diff virou um inspetor expansível. Header "DIFF +N ~N -N" clicável expande painel (max-h-52, scroll) com seções ADICIONADAS/EDITADAS/REMOVIDAS; cada ID é um chip clicável que ENQUADRA o elemento no viewport (reusa focusRequest); chips de removidos são estáticos com strike-through e tooltip "só no documento atual"; aviso âmbar quando panel_changed; limite de 40 chips por seção com "+N…".
+- FEATURE — BOM com insights: barra empilhada de distribuição de peso por grupo (paleta quente sem azul, top 4 na legenda com %), "maior peso" destacado (TrendingUp), contagens (itens/peças/elementos), tabela com zebra + hover laranja + grupo como sub-linha, header com ícone Package, total em kg + toneladas. Verificado no browser: BASES 63% / ESTRUTURA 37% / FIXAÇÃO 0%, maior peso CHAPA 4000x650x30mm 612.3 kg, total 1094.2 kg (1.094 t).
+- E2E REAL via agent-browser (Z.ai glm-4.5-flash): pedido "adicione uma escada de acesso com degraus no poste direito" → 110s → candidato com 14 elementos novos (grupo ESCALA: LADDER-01..12 degraus + 2 rails METALON_40x40x2), assumptions coerentes (fixação POST-02, degraus 300mm, 75°, altura 3000mm); DIFF +14 ~0 -0; chip LADDER-06 clicado → câmera enquadrou + info card com peso ≈0.69 kg; APLICAR → rev 11 (45 el., hash da47c28e).
+- E2E REAL few-shot: exemplo salvo (rev 10→11, 15.2KB) via API; segunda transformação "troque o perfil dos postes para TUBO_250x10" retornou meta.few_shot_id preenchido (injeção confirmada), 2 editadas, 105.7s (few-shot ~dobra tokens de entrada, latência esperada). Candidato NÃO aplicado (mantido estado com escada).
+- QA mobile 390×844: dock empilha, DiffInspector acima da PreviewBar, seção exemplos acessível. Lint limpo; tsc sem erros em src/. Commit <hash da rodada>.
+
+Stage Summary:
+- Estado: rev 11 "Outdoor Rodovia BR-116" com escada aplicada (45 el., 12 grupos), Z.ai glm-4.5-flash ativo, 1 exemplo few-shot válido (escada) em data/examples.
+- Pipeline few-shot agora tem ciclo de vida completo verificado: transformar → aplicar → salvar exemplo → gerenciar (listar/excluir) → reusar automaticamente na próxima transformação (few_shot_id confirmado).
+- DoD segue 21/21 + novos extras. Latência observada Z.ai com few-shot: ~105-110s (documento 31-45 el.).
+- Próximos passos sugeridos (prioridade): 1) modo comparação lado-a-lado (split viewport) além do ghost; 2) relatório PDF do diff entre revisões; 3) covisão end-to-end com croqui + glm-4.5v (anexo já alerta corretamente); 4) few-shot: escolher exemplo por similaridade simples (palavras-chave) em vez do mais recente; 5) undo stack visível na UI (timeline já existe — faltam marcadores de undo/restore).
