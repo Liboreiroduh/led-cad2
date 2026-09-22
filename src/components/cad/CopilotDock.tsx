@@ -13,14 +13,15 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   Send, Paperclip, Copy, CheckCircle2, AlertTriangle, Info, FileJson,
-  Save, Loader2, RotateCcw, Download, Upload, Braces, Sparkles, Trash2, Move, Replace, CopyPlus,
+  Save, Loader2, RotateCcw, Download, Upload, Braces, Sparkles, Trash2, Move, Replace, CopyPlus, ListTree,
 } from "lucide-react";
 import { api, ApiCallError } from "@/lib/cad/client-api";
 import type { Assumption, ProjectDocument, ProjectDiff } from "@/lib/cad/schema";
 import type { HistoryItem } from "./types";
+import { ElementBrowser } from "./ElementBrowser";
 import { toast } from "sonner";
 
-export type DockTab = "copiloto" | "json" | "presets";
+export type DockTab = "copiloto" | "json" | "presets" | "elementos";
 
 interface CopilotDockProps {
   tab: DockTab;
@@ -36,6 +37,15 @@ interface CopilotDockProps {
   onOpenProviders: () => void;
   onOpenJsonTab: () => void;
   onAppliedCandidate: () => void;
+  /** element browser */
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  hiddenIds: Set<string>;
+  onToggleHidden: (id: string) => void;
+  onIsolateGroup: (group: string | null) => void;
+  isolatedGroup: string | null;
+  onFocusElement: (id: string) => void;
+  candidateDoc: ProjectDocument | null;
 }
 
 function assumptionText(a: Assumption): string {
@@ -52,6 +62,7 @@ export function CopilotDock(props: CopilotDockProps) {
             ["copiloto", "Copiloto", <Sparkles key="i" className="h-3.5 w-3.5" />],
             ["json", "JSON", <Braces key="i" className="h-3.5 w-3.5" />],
             ["presets", "Presets", <FileJson key="i" className="h-3.5 w-3.5" />],
+            ["elementos", "Elem.", <ListTree key="i" className="h-3.5 w-3.5" />],
           ] as const
         ).map(([id, label, icon]) => (
           <button
@@ -59,7 +70,7 @@ export function CopilotDock(props: CopilotDockProps) {
             role="tab"
             aria-selected={tab === id}
             onClick={() => props.onTabChange(id as DockTab)}
-            className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-semibold tracking-wide transition-colors ${
+            className={`flex-1 flex items-center justify-center gap-1 py-2.5 text-[10.5px] font-semibold tracking-wide transition-colors ${
               tab === id ? "bg-white text-slate-900 border-b-2 border-orange-500" : "hover:bg-slate-700"
             }`}
           >
@@ -72,6 +83,19 @@ export function CopilotDock(props: CopilotDockProps) {
       {tab === "copiloto" && <CopilotTab {...props} />}
       {tab === "json" && <JsonTab {...props} />}
       {tab === "presets" && <PresetsTab {...props} />}
+      {tab === "elementos" && (
+        <ElementBrowser
+          project={props.project}
+          candidate={props.candidateDoc}
+          selectedId={props.selectedId}
+          onSelect={props.onSelect}
+          hiddenIds={props.hiddenIds}
+          onToggleHidden={props.onToggleHidden}
+          onIsolateGroup={props.onIsolateGroup}
+          isolatedGroup={props.isolatedGroup}
+          onFocus={props.onFocusElement}
+        />
+      )}
     </aside>
   );
 }
@@ -111,8 +135,6 @@ function CopilotTab(props: CopilotDockProps) {
     setAttachments((a) => [...a, ...next].slice(0, 3));
   };
 
-  const el = props.selectedElement;
-
   return (
     <>
       <div ref={scrollRef} className="flex-1 overflow-y-auto cad-scroll p-3 space-y-3 min-h-0">
@@ -124,7 +146,7 @@ function CopilotTab(props: CopilotDockProps) {
           </div>
         )}
         {props.history.map((h) => (
-          <HistoryCard key={h.id} item={h} onSaveExample={saveExampleFromHistory} />
+          <HistoryCard key={h.id} item={h} onSaveExample={(it) => saveExampleFromHistory(it, props.project)} />
         ))}
         {props.sending && (
           <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-3">
@@ -134,18 +156,18 @@ function CopilotTab(props: CopilotDockProps) {
         )}
       </div>
 
-      {el && (
+      {props.selectedElement && (
         <div className="border-t border-slate-200 bg-orange-50/60 px-3 pt-2 pb-1">
           <div className="text-[11px] font-semibold text-orange-800 mb-1.5 truncate">
-            selecionado: {el.id} · {el.type} · {el.role}
-            {el.type === "beam" && ` · ${(el as { profile?: string }).profile ?? ""}`}
+            selecionado: {props.selectedElement.id} · {props.selectedElement.type} · {props.selectedElement.role}
+            {props.selectedElement.type === "beam" && ` · ${(props.selectedElement as { profile?: string }).profile ?? ""}`}
           </div>
           <div className="flex flex-wrap gap-1.5 pb-1.5">
-            <Chip icon={<CopyPlus className="h-3 w-3" />} label="duplicar" onClick={() => setInput(`Duplique o elemento ${el.id} mantendo o alinhamento com o painel e ajustando IDs.`)} />
-            <Chip icon={<Move className="h-3 w-3" />} label="mover" onClick={() => setInput(`Mova o elemento ${el.id} e informe o deslocamento desejado (mm em X/Y/Z).`)} />
-            <Chip icon={<Replace className="h-3 w-3" />} label="trocar perfil" onClick={() => setInput(`Troque o perfil do elemento ${el.id} para um perfil do catálogo adequado ao esforço.`)} />
-            <Chip icon={<Copy className="h-3 w-3" />} label="adicionar paralelo" onClick={() => setInput(`Adicione um elemento paralelo ao ${el.id}, afastado simetricamente na estrutura.`)} />
-            <Chip icon={<Trash2 className="h-3 w-3" />} label="excluir" onClick={() => setInput(`Exclua o elemento ${el.id} e remova o que depender dele, preservando a coerência estrutural.`)} />
+            <Chip icon={<CopyPlus className="h-3 w-3" />} label="duplicar" onClick={() => setInput(`Duplique o elemento ${props.selectedElement!.id} mantendo o alinhamento com o painel e ajustando IDs.`)} />
+            <Chip icon={<Move className="h-3 w-3" />} label="mover" onClick={() => setInput(`Mova o elemento ${props.selectedElement!.id} e informe o deslocamento desejado (mm em X/Y/Z).`)} />
+            <Chip icon={<Replace className="h-3 w-3" />} label="trocar perfil" onClick={() => setInput(`Troque o perfil do elemento ${props.selectedElement!.id} para um perfil do catálogo adequado ao esforço.`)} />
+            <Chip icon={<Copy className="h-3 w-3" />} label="adicionar paralelo" onClick={() => setInput(`Adicione um elemento paralelo ao ${props.selectedElement!.id}, afastado simetricamente na estrutura.`)} />
+            <Chip icon={<Trash2 className="h-3 w-3" />} label="excluir" onClick={() => setInput(`Exclua o elemento ${props.selectedElement!.id} e remova o que depender dele, preservando a coerência estrutural.`)} />
           </div>
         </div>
       )}
@@ -198,11 +220,11 @@ function CopilotTab(props: CopilotDockProps) {
   );
 }
 
-async function saveExampleFromHistory(item: HistoryItem) {
+async function saveExampleFromHistory(item: HistoryItem, before: ProjectDocument) {
   try {
     await api.saveExample({
       request: item.text,
-      before: null,
+      before,
       after: item.meta?.candidate ?? null,
       operator_note: item.meta?.diffSummary ?? "",
     });

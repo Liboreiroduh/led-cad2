@@ -20,6 +20,47 @@ export const STATUS_COLORS: Record<DiffStatus, number> = {
 const STEEL = 0x8b95a1;
 const PANEL = 0x1f2937;
 
+/** Textura de painel LED (módulos + pixels) gerada em canvas — referência visual. */
+let _panelTexture: THREE.CanvasTexture | null = null;
+function panelTexture(): THREE.CanvasTexture {
+  if (_panelTexture) return _panelTexture;
+  const c = document.createElement("canvas");
+  c.width = 512;
+  c.height = 256;
+  const g = c.getContext("2d")!;
+  g.fillStyle = "#0a0e14";
+  g.fillRect(0, 0, c.width, c.height);
+  // grade de módulos (gabinetes)
+  const modW = c.width / 8;
+  const modH = c.height / 4;
+  g.strokeStyle = "#1d2735";
+  g.lineWidth = 3;
+  for (let i = 0; i <= 8; i++) {
+    g.beginPath();
+    g.moveTo(i * modW, 0);
+    g.lineTo(i * modW, c.height);
+    g.stroke();
+  }
+  for (let j = 0; j <= 4; j++) {
+    g.beginPath();
+    g.moveTo(0, j * modH);
+    g.lineTo(c.width, j * modH);
+    g.stroke();
+  }
+  // pixels LED (sutil variação)
+  for (let y = 6; y < c.height; y += 10) {
+    for (let x = 6; x < c.width; x += 10) {
+      const v = Math.random();
+      g.fillStyle =
+        v > 0.985 ? "rgba(249,115,22,0.55)" : v > 0.9 ? "rgba(148,163,184,0.20)" : "rgba(41,52,66,0.55)";
+      g.fillRect(x, y, 4, 4);
+    }
+  }
+  _panelTexture = new THREE.CanvasTexture(c);
+  _panelTexture.colorSpace = THREE.SRGBColorSpace;
+  return _panelTexture;
+}
+
 function v3(p: { x: number; y: number; z: number }): THREE.Vector3 {
   return new THREE.Vector3(p.x, p.z, p.y);
 }
@@ -125,7 +166,7 @@ export function buildProjectGroup(
       bbox.expandByObject(mesh);
     } else if (el.type === "panel") {
       const statusColor = status && status !== "unchanged" ? STATUS_COLORS[status] : PANEL;
-      const mat = new THREE.MeshStandardMaterial({
+      const baseMat = new THREE.MeshStandardMaterial({
         color: statusColor,
         metalness: 0.2,
         roughness: 0.35,
@@ -135,10 +176,24 @@ export function buildProjectGroup(
         emissiveIntensity: status && status !== "unchanged" ? 0.25 : 0.08,
         side: THREE.DoubleSide,
       });
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(el.size_x, el.size_z, el.size_y), mat);
+      // face frontal (three +Z) recebe a textura de módulos LED
+      const frontMat = baseMat.clone();
+      frontMat.map = panelTexture();
+      frontMat.emissiveMap = panelTexture();
+      frontMat.emissive = new THREE.Color(0xffffff);
+      frontMat.emissiveIntensity = status && status !== "unchanged" ? 0.35 : 0.5;
+      const geo = new THREE.BoxGeometry(el.size_x, el.size_z, el.size_y);
+      const mesh = new THREE.Mesh(geo, [
+        baseMat,
+        baseMat,
+        baseMat,
+        baseMat,
+        frontMat,
+        baseMat,
+      ]);
       mesh.position.copy(v3(el.center));
       const edges = new THREE.LineSegments(
-        new THREE.EdgesGeometry(mesh.geometry),
+        new THREE.EdgesGeometry(geo),
         new THREE.LineBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.55 }),
       );
       mesh.add(edges);

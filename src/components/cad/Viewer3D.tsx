@@ -26,6 +26,12 @@ export interface Viewer3DProps {
   onSelect: (id: string | null) => void;
   viewMode: ViewMode;
   fitKey: string;
+  /** ids ocultos (controle de visibilidade por elemento) */
+  hiddenIds?: Set<string>;
+  /** requisição de foco: { id, nonce } — enquadra a câmera no elemento */
+  focusRequest?: { id: string; nonce: number } | null;
+  /** nonce > 0 dispara download de PNG do viewport */
+  snapshotSignal?: number;
 }
 
 interface RefState {
@@ -36,6 +42,7 @@ interface RefState {
   content: THREE.Group;
   bbox: THREE.Box3;
   selectionHelper: THREE.BoxHelper | null;
+  byId: Map<string, THREE.Object3D[]>;
 }
 
 export default function Viewer3D(props: Viewer3DProps) {
@@ -80,7 +87,7 @@ export default function Viewer3D(props: Viewer3DProps) {
     const content = new THREE.Group();
     scene.add(content);
 
-    stateRef.current = { renderer, scene, camera, controls, content, bbox: new THREE.Box3(), selectionHelper: null };
+    stateRef.current = { renderer, scene, camera, controls, content, bbox: new THREE.Box3(), selectionHelper: null, byId: new Map() };
 
     let raf = 0;
     const animate = () => {
@@ -175,22 +182,27 @@ export default function Viewer3D(props: Viewer3DProps) {
       st.selectionHelper = null;
     }
 
-    const { project, candidate, statuses, candidateStatuses } = propsRef.current;
+    const { project, candidate, statuses, candidateStatuses, hiddenIds } = propsRef.current;
     st.bbox.makeEmpty();
+    st.byId = new Map();
 
     if (candidate) {
       const oldGroup = buildProjectGroup(project, statuses);
       const newGroup = buildProjectGroup(candidate, candidateStatuses, { skipUnchanged: true });
       st.content.add(oldGroup.group);
       st.content.add(newGroup.group);
+      for (const [k, v] of oldGroup.byId) st.byId.set(k, v);
+      for (const [k, v] of newGroup.byId) st.byId.set(k, [...(st.byId.get(k) ?? []), ...v]);
       st.bbox.expandByObject(oldGroup.group);
       st.bbox.expandByObject(newGroup.group);
     } else {
       const g = buildProjectGroup(project);
       st.content.add(g.group);
+      for (const [k, v] of g.byId) st.byId.set(k, v);
       st.bbox.expandByObject(g.group);
     }
 
+    applyVisibility(st, hiddenIds);
     fitViewInternal(st, propsRef.current.viewMode);
     // reaplica highlight atual
     applyHighlightInternal(st, propsRef.current.selectedId);
@@ -210,7 +222,62 @@ export default function Viewer3D(props: Viewer3DProps) {
     applyHighlightInternal(st, props.selectedId);
   }, [props.selectedId]);
 
+  // ---------- visibility (hidden ids) ----------
+  useEffect(() => {
+    const st = stateRef.current;
+    if (!st) return;
+    applyVisibility(st, props.hiddenIds);
+  }, [props.hiddenIds]);
+
+  // ---------- focus element ----------
+  useEffect(() => {
+    const st = stateRef.current;
+    if (!st || !props.focusRequest) return;
+    const objs = st.byId.get(props.focusRequest.id);
+    if (!objs?.length) return;
+    const box = new THREE.Box3();
+    for (const o of objs) {
+      const m = o as THREE.Mesh;
+      if (m.isMesh || (o as THREE.LineSegments).isLineSegments) box.expandByObject(o);
+    }
+    if (box.isEmpty()) return;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const radius = Math.max(size.length() / 2, 400);
+    const dir = st.camera.position.clone().sub(st.controls.target).normalize();
+    const dist = (radius / Math.sin((st.camera.fov * Math.PI) / 360)) * 1.4;
+    st.camera.position.copy(center).add(dir.multiplyScalar(dist));
+    st.controls.target.copy(center);
+    st.controls.update();
+  }, [props.focusRequest?.nonce]);
+
+  // ---------- snapshot PNG ----------
+  useEffect(() => {
+    const st = stateRef.current;
+    if (!st || !props.snapshotSignal) return;
+    st.renderer.render(st.scene, st.camera);
+    const url = st.renderer.domElement.toDataURL("image/png");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `led-cad-3d-${Date.now()}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }, [props.snapshotSignal]);
+
   return <div ref={mountRef} className="absolute inset-0" aria-label="Viewport 3D do projeto" role="application" />;
+}
+
+function applyVisibility(st: RefState, hiddenIds?: Set<string>): void {
+  for (const [, objs] of st.byId) {
+    for (const o of objs) {
+      const visible = !(hiddenIds?.has(o.userData.elementId as string) ?? false);
+      o.visible = visible;
+      o.traverse((c) => {
+        c.visible = visible;
+      });
+    }
+  }
 }
 
 function fitViewInternal(st: RefState, view: ViewMode): void {
