@@ -26,3 +26,24 @@ Stage Summary:
 - Latências Z.ai com documento completo: 22–52s (glm-4.5-flash); UI mostra loading e timeout configurável (120s default).
 - Artefatos: app em `/` (porta 3000), store em `data/`, PDF/BOM exportáveis, 4 presets + custom.
 - Próximos passos sugeridos: few-shot com examples/, visão (glm-4.5v) para croquis, comparação lado-a-lado de revisões, lock de edição multi-usuário.
+
+---
+Task ID: cron-review-202609230703 (round 2)
+Agent: Z.ai Code (cron webDevReview)
+Task: Avaliar estado do projeto, QA via agent-browser e evoluir com novas features + polish de styling.
+
+Work Log:
+- QA: health 200 (rev 8), dev.log sem erros, screenshot confirmou estado estável (REF_4000X2000, IA Z.ai ativa). Sem regressões a corrigir → rodada de evolução.
+- FEATURE — Element Browser (nova aba "ELEM." no dock, `src/components/cad/ElementBrowser.tsx`): árvore de elementos agrupada por `group`, busca (id/tipo/role/perfil), contagem, toggle de visibilidade por elemento e por grupo (olho), ISOLAR GRUPO ao clicar no título (badge "ISOLADO: X ×" no viewport + footer indicando isolamento), botão "localizar" (crosshair) que enquadra a câmera no elemento (focusRequest com nonce no Viewer3D).
+- FEATURE — Textura LED no painel 3D (`sceneBuilder.ts`): CanvasTexture procedural (grade de módulos 8×4 + pixels com variação sutil + pontos laranja) aplicada como map+emissiveMap na face frontal do elemento type=panel; painel agora parece uma tela LED de verdade.
+- FEATURE — Snapshot PNG do viewport: botão câmera na barra de vistas → render explícito + toDataURL → download `led-cad-3d-*.png` (testado: 88KB gerado).
+- FEATURE — Atalhos de teclado: teclas 1–7 trocam as vistas (fora de inputs), Esc desseleciona, popover "?" com a lista completa de atalhos.
+- FEATURE — Histórico do copiloto persistido em localStorage (últimos 30, candidatos removidos para quota), restaurado no reload.
+- FIX — "Salvar como exemplo" agora envia `before` (projeto atual) além de `after`.
+- STYLING — Barra de vistas em linha única (scroll horizontal em telas pequenas) com botões redondos de câmera/atalhos; PreviewBar com animação spring (framer-motion) e borda laranja; legenda de diff animada; badge de isolamento animado; footer com contagem "N el. · N grupos"; abas do dock com 4ª aba e tipografia ajustada; sombras/backdrop-blur consistentes.
+
+Stage Summary:
+- Verificado via agent-browser: ELEM tab com todos os grupos, isolamento CONTRAVENTAMENTO (só X-braces visíveis + badge), "mostrar todos", foco em PANEL-LED (câmera enquadrou + highlight), atalho "2" → Frente, PNG exportado, textura LED visível na vista frontal.
+- tsc + eslint limpos; commit df03b6c.
+- Estado: rev 8, REF_4000X2000, provider ativo Z.ai glm-4.5-flash.
+- Próximos passos sugeridos (prioridade): 1) comparação lado-a-lado de revisões (diff visual histórico); 2) visão glm-4.5v com croqui (anexo já suportado na UI, falta UX de feedback); 3) cotas 3D (linhas de dimensão width/height/PD no viewer); 4) redimensionamento do dock (arrastar borda); 5) few-shot: injetar examples/ no prompt quando disponíveis.
