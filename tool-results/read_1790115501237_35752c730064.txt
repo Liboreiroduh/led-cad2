@@ -1,0 +1,1688 @@
+     1→# TASK MASTER — LED JSON CAD BUILDER
+     2→## Novo projeto do zero — CAD dirigido por JSON + IA como transformadora de documento
+     3→
+     4→**Agente alvo:** Fable 5.1 — Medium  
+     5→**Modo:** implementação autônoma e contínua  
+     6→**Nome recomendado do projeto:** `led-json-cad`  
+     7→**Objetivo:** construir um CAD para estruturas de painéis LED cuja fonte de verdade seja um documento JSON completo. A IA não opera o CAD por comandos; ela lê o JSON atual, entende o pedido do usuário e devolve um novo JSON completo e válido. O sistema valida, calcula diff, renderiza preview e só aplica após confirmação.
+     8→
+     9→---
+    10→
+    11→# 0. INSTRUÇÃO DE EXECUÇÃO
+    12→
+    13→Você está em uma pasta nova.
+    14→
+    15→Não entregue somente planejamento. Implemente o produto.
+    16→
+    17→Regras:
+    18→
+    19→1. Trabalhe autonomamente até o Definition of Done ou até um bloqueio real de credencial externa.
+    20→2. Não peça confirmação para criar arquivos, instalar dependências, executar comandos, iniciar servidor, testar localhost ou corrigir erros locais.
+    21→3. Não entre em ciclos infinitos de teste; faça smoke tests focados.
+    22→4. Use o navegador integrado para validar `http://localhost:3000`.
+    23→5. Deve existir **um único processo obrigatório** para rodar a aplicação.
+    24→6. Se não houver Git, execute `git init`.
+    25→7. Faça commits locais por milestone.
+    26→8. Não faça push e não configure remote.
+    27→9. Se não houver API key de IA, implemente tudo e use mock/dev mode para validar o fluxo.
+    28→10. Não recrie a arquitetura antiga de operações. A autoridade é o JSON completo do projeto.
+    29→
+    30→---
+    31→
+    32→# 1. VISÃO DO PRODUTO
+    33→
+    34→O produto é um CAD de estruturas LED orientado a documento.
+    35→
+    36→Fluxo principal:
+    37→
+    38→```text
+    39→TEXTO / PRESET / IMAGEM / PDF / JSON
+    40→                ↓
+    41→            IA interpreta
+    42→                ↓
+    43→       PROJECT JSON candidato
+    44→                ↓
+    45→      Pydantic / validação geométrica
+    46→                ↓
+    47→      diff JSON atual × candidato
+    48→                ↓
+    49→            PREVIEW 3D
+    50→                ↓
+    51→         usuário APROVA
+    52→                ↓
+    53→    PROJECT JSON candidato vira atual
+    54→                ↓
+    55→       PDF / BOM / export JSON
+    56→```
+    57→
+    58→Princípio central:
+    59→
+    60→```text
+    61→JSON descreve o projeto.
+    62→IA escreve ou reescreve o JSON.
+    63→Python valida.
+    64→Renderer desenha.
+    65→Usuário aprova.
+    66→```
+    67→
+    68→A IA NÃO deve devolver mini-operações como:
+    69→
+    70→```text
+    71→add_post
+    72→move_element
+    73→delete_element
+    74→resize_element
+    75→multi_move
+    76→```
+    77→
+    78→Esse contrato de operações foi um limitador no projeto anterior.
+    79→
+    80→A nova IA devolve o **documento completo desejado**.
+    81→
+    82→---
+    83→
+    84→# 2. LIÇÃO PRINCIPAL DO PROJETO ANTIGO
+    85→
+    86→O projeto antigo provou que a IA frequentemente entende corretamente o pedido, mas falha porque o executor não aceita algum campo ou porque uma operação específica não existe.
+    87→
+    88→Exemplo do problema antigo:
+    89→
+    90→```text
+    91→IA entendeu "adicione um poste"
+    92→→ devolveu add_post com group
+    93→→ schema de add_post não aceitava group
+    94→→ pedido falhou mesmo com intenção correta
+    95→```
+    96→
+    97→No projeto novo isso NÃO deve existir.
+    98→
+    99→Se a IA quer um poste, ela simplesmente devolve no JSON:
+   100→
+   101→```json
+   102→{
+   103→  "id": "POST-02",
+   104→  "type": "beam",
+   105→  "role": "post",
+   106→  "profile": "TUBO_219x4.75",
+   107→  "group": "POSTES",
+   108→  "start": {"x": 500, "y": -325, "z": 0},
+   109→  "end": {"x": 500, "y": -325, "z": 3000}
+   110→}
+   111→```
+   112→
+   113→O sistema valida e renderiza.
+   114→
+   115→---
+   116→
+   117→# 3. O QUE MANTER DO PROJETO ANTIGO
+   118→
+   119→Conservar como conceitos:
+   120→
+   121→- unidade interna única: milímetros;
+   122→- X = largura;
+   123→- Y = profundidade;
+   124→- Z = altura;
+   125→- solo = Z 0;
+   126→- painel LED como referência visual;
+   127→- elementos geométricos simples e semânticos;
+   128→- IDs estáveis;
+   129→- perfis catalogados;
+   130→- Three.js para preview;
+   131→- OrbitControls;
+   132→- vistas frontal, traseira, lateral, superior e isométrica;
+   133→- projeções e cotas derivadas do modelo;
+   134→- PDF LED Collor dinâmico;
+   135→- BOM derivado da geometria;
+   136→- preview antes de aplicar;
+   137→- undo atômico.
+   138→
+   139→Não portar:
+   140→
+   141→- Next.js;
+   142→- dois servidores;
+   143→- `ai_intent`;
+   144→- `ai_contract` baseado em operações;
+   145→- `ai_ops`;
+   146→- `local_edit`;
+   147→- `global_resize`;
+   148→- `pending_question`;
+   149→- memória conversacional no backend;
+   150→- dezenas de handlers semânticos;
+   151→- múltiplos exporters concorrentes;
+   152→- state store oculto;
+   153→- seleção de preset só por dimensão;
+   154→- regras duplicadas entre parser/preset/IA/compilador.
+   155→
+   156→---
+   157→
+   158→# 4. ARQUITETURA OBRIGATÓRIA
+   159→
+   160→Stack:
+   161→
+   162→```text
+   163→Python
+   164→FastAPI
+   165→Pydantic v2
+   166→Three.js
+   167→HTML/CSS/JS vanilla
+   168→ReportLab
+   169→google-genai
+   170→httpx
+   171→python-dotenv
+   172→```
+   173→
+   174→Não usar Next.js.
+   175→
+   176→Não criar servidor Node.
+   177→
+   178→Execução final:
+   179→
+   180→```cmd
+   181→py main.py
+   182→```
+   183→
+   184→URL:
+   185→
+   186→```text
+   187→http://localhost:3000
+   188→```
+   189→
+   190→Estrutura sugerida:
+   191→
+   192→```text
+   193→led-json-cad/
+   194→├── main.py
+   195→├── requirements.txt
+   196→├── .env.example
+   197→├── .gitignore
+   198→├── README.md
+   199→│
+   200→├── app/
+   201→│   ├── __init__.py
+   202→│   ├── api.py
+   203→│   └── config.py
+   204→│
+   205→├── domain/
+   206→│   ├── __init__.py
+   207→│   ├── project.py
+   208→│   ├── element.py
+   209→│   ├── profiles.py
+   210→│   ├── validation.py
+   211→│   └── hashing.py
+   212→│
+   213→├── services/
+   214→│   ├── project_diff.py
+   215→│   ├── project_store.py
+   216→│   ├── presets.py
+   217→│   └── ai/
+   218→│       ├── __init__.py
+   219→│       ├── base.py
+   220→│       ├── registry.py
+   221→│       ├── gemini.py
+   222→│       ├── zai.py
+   223→│       ├── transformer.py
+   224→│       └── prompts.py
+   225→│
+   226→├── presets/
+   227→│   ├── references/
+   228→│   └── custom/
+   229→│
+   230→├── drawing/
+   231→│   ├── projections.py
+   232→│   ├── dimensions.py
+   233→│   └── svg.py
+   234→│
+   235→├── export/
+   236→│   ├── pdf.py
+   237→│   ├── bom.py
+   238→│   └── json_export.py
+   239→│
+   240→├── static/
+   241→│   ├── index.html
+   242→│   ├── css/app.css
+   243→│   ├── js/app.js
+   244→│   ├── js/api.js
+   245→│   ├── js/viewer.js
+   246→│   ├── js/ai.js
+   247→│   ├── js/json-editor.js
+   248→│   └── vendor/
+   249→│
+   250→├── tests/
+   251→│   ├── test_project_schema.py
+   252→│   ├── test_diff.py
+   253→│   ├── test_ai_transform.py
+   254→│   ├── test_presets.py
+   255→│   └── test_api.py
+   256→│
+   257→└── docs/
+   258→    ├── ARCHITECTURE.md
+   259→    ├── PROJECT_JSON_SCHEMA.md
+   260→    ├── AI_CONTRACT.md
+   261→    └── PROVIDERS.md
+   262→```
+   263→
+   264→---
+   265→
+   266→# 5. PROJECT JSON É A AUTORIDADE
+   267→
+   268→Criar um único modelo Pydantic principal:
+   269→
+   270→```python
+   271→ProjectDocument
+   272→```
+   273→
+   274→Ele representa o projeto inteiro.
+   275→
+   276→Formato base:
+   277→
+   278→```json
+   279→{
+   280→  "schema_version": 1,
+   281→  "units": "mm",
+   282→  "project": {
+   283→    "id": "uuid-ou-hash",
+   284→    "name": "Painel LED",
+   285→    "description": ""
+   286→  },
+   287→  "panel": {
+   288→    "width": 1920,
+   289→    "height": 960,
+   290→    "depth": 650,
+   291→    "ground_clearance": 3000
+   292→  },
+   293→  "installation": {
+   294→    "type": "post",
+   295→    "environment": "outdoor"
+   296→  },
+   297→  "elements": [],
+   298→  "assumptions": [],
+   299→  "metadata": {
+   300→    "source": "ai",
+   301→    "preset_id": null
+   302→  }
+   303→}
+   304→```
+   305→
+   306→O JSON atual é a fonte de verdade.
+   307→
+   308→O canvas é somente uma visualização.
+   309→
+   310→O PDF é derivado dele.
+   311→
+   312→O BOM é derivado dele.
+   313→
+   314→O diff é derivado dele.
+   315→
+   316→A IA recebe esse JSON e devolve outro JSON.
+   317→
+   318→---
+   319→
+   320→# 6. ELEMENTOS GEOMÉTRICOS
+   321→
+   322→Suportar inicialmente:
+   323→
+   324→```text
+   325→beam
+   326→plate
+   327→bolt
+   328→panel
+   329→cable
+   330→surface
+   331→```
+   332→
+   333→## 6.1 Beam
+   334→
+   335→```json
+   336→{
+   337→  "id": "POST-01",
+   338→  "type": "beam",
+   339→  "role": "post",
+   340→  "profile": "TUBO_219x4.75",
+   341→  "group": "POSTES",
+   342→  "start": {"x": 0, "y": -325, "z": 0},
+   343→  "end": {"x": 0, "y": -325, "z": 3000},
+   344→  "label": ""
+   345→}
+   346→```
+   347→
+   348→## 6.2 Plate
+   349→
+   350→```json
+   351→{
+   352→  "id": "BASE-01",
+   353→  "type": "plate",
+   354→  "role": "base",
+   355→  "group": "BASES",
+   356→  "center": {"x": 0, "y": -325, "z": 10},
+   357→  "size_x": 500,
+   358→  "size_y": 500,
+   359→  "size_z": 20
+   360→}
+   361→```
+   362→
+   363→## 6.3 Cable
+   364→
+   365→Cabo/tirante precisa ser um elemento de primeira classe:
+   366→
+   367→```json
+   368→{
+   369→  "id": "CABO-01",
+   370→  "type": "cable",
+   371→  "role": "support",
+   372→  "group": "FIXACAO",
+   373→  "start": {"x": -960, "y": -650, "z": 3000},
+   374→  "end": {"x": -960, "y": -1500, "z": 4200},
+   375→  "diameter": 8,
+   376→  "label": "CABO DE FIXACAO"
+   377→}
+   378→```
+   379→
+   380→Renderer pode usar cylinder fino ou line segment.
+   381→
+   382→## 6.4 Panel
+   383→
+   384→Painel LED é referência visual, não aço.
+   385→
+   386→## 6.5 Surface
+   387→
+   388→Para casos especiais, permitir superfície/polígono simples sem forçar tudo a ser beam.
+   389→
+   390→---
+   391→
+   392→# 7. PAPÉIS E GRUPOS
+   393→
+   394→`role` deve ser um enum razoavelmente aberto, mas não exigir handler específico.
+   395→
+   396→Exemplos:
+   397→
+   398→```text
+   399→post
+   400→vertical
+   401→horizontal
+   402→brace
+   403→support
+   404→guardrail
+   405→walkway
+   406→base
+   407→anchor
+   408→panel
+   409→other
+   410→```
+   411→
+   412→`group` é string livre validada em tamanho.
+   413→
+   414→Exemplos:
+   415→
+   416→```text
+   417→POSTES
+   418→GAIOLA FRENTE
+   419→GAIOLA TRAS
+   420→PASSARELA
+   421→GUARDA-CORPO
+   422→FIXACAO PAREDE
+   423→CABOS
+   424→CONTRAVENTAMENTO
+   425→```
+   426→
+   427→A IA pode criar grupos novos sem precisar mudar código.
+   428→
+   429→---
+   430→
+   431→# 8. CATÁLOGO DE PERFIS
+   432→
+   433→Criar catálogo mínimo:
+   434→
+   435→```text
+   436→METALON_40x40x2
+   437→METALON_50x50x2
+   438→METALON_60x60x2
+   439→METALON_100x100x3
+   440→TUBO_219x4.75
+   441→TUBO_250x10
+   442→TUBO_380_t4.8
+   443→TUBO_380_t6.35
+   444→```
+   445→
+   446→Cada perfil:
+   447→
+   448→```json
+   449→{
+   450→  "name": "METALON_60x60x2",
+   451→  "kind": "square",
+   452→  "w": 60,
+   453→  "h": 60,
+   454→  "t": 2,
+   455→  "kgm": 3.66
+   456→}
+   457→```
+   458→
+   459→Perfis desconhecidos devem falhar na validação OU entrar como assumption pendente, nunca silenciosamente.
+   460→
+   461→---
+   462→
+   463→# 9. PRESETS
+   464→
+   465→Preset = ProjectDocument completo válido.
+   466→
+   467→Formato:
+   468→
+   469→```json
+   470→{
+   471→  "id": "REF_4000X2000",
+   472→  "name": "4000 × 2000 — Outdoor",
+   473→  "description": "...",
+   474→  "project": {
+   475→    "...": "ProjectDocument completo"
+   476→  }
+   477→}
+   478→```
+   479→
+   480→Nada de:
+   481→
+   482→```text
+   483→preset → template → enrichment → intent → operações
+   484→```
+   485→
+   486→Carregar preset significa carregar JSON.
+   487→
+   488→Preset não é escolhido só por dimensão.
+   489→
+   490→Exemplos:
+   491→
+   492→```text
+   493→"painel 4x2 metros"
+   494→→ não escolhe preset automaticamente
+   495→
+   496→"use o preset 4x2"
+   497→→ pode carregar REF_4000X2000
+   498→```
+   499→
+   500→---
+   501→
+   502→# 10. QUATRO PRESETS INICIAIS
+   503→
+   504→Criar referências iniciais baseadas no conhecimento validado do sistema anterior:
+   505→
+   506→## REF_2000X4000
+   507→- painel 2000×4000
+   508→- outdoor
+   509→- PD 2000
+   510→- 2 postes
+   511→- gaiola 650
+   512→- modulação estrutural X=2 bays
+   513→- rail spacing 1000
+   514→- frame METALON_60x60x2
+   515→- secondary METALON_40x40x2
+   516→- post TUBO_380_t6.35
+   517→
+   518→## REF_2000X5000
+   519→- painel 2000×5000
+   520→- outdoor
+   521→- PD 2000
+   522→- 2 postes
+   523→- gaiola 800
+   524→- bays X=2
+   525→- spacing 1000
+   526→- post fallback TUBO_380_t4.8
+   527→- assumption: referência original usava PERFIL H 310×93
+   528→
+   529→## REF_3000X2000
+   530→- painel 3000×2000
+   531→- PD 3000
+   532→- 2 postes
+   533→- gaiola 650
+   534→- bays X=3
+   535→- spacing 1000
+   536→- post TUBO_250x10
+   537→
+   538→## REF_4000X2000
+   539→- painel 4000×2000
+   540→- PD 3000
+   541→- 2 postes
+   542→- gaiola 650
+   543→- bays X=4
+   544→- spacing 1000
+   545→- post TUBO_380_t4.8
+   546→
+   547→IMPORTANTE:
+   548→
+   549→```text
+   550→structural bays ≠ cabinet grid
+   551→```
+   552→
+   553→Nunca tratar modulação estrutural como gabinete.
+   554→
+   555→---
+   556→
+   557→# 11. IA — MODELO MENTAL
+   558→
+   559→A IA não executa ferramentas CAD.
+   560→
+   561→Ela funciona como:
+   562→
+   563→```text
+   564→Project JSON atual
+   565→+ pedido do usuário
+   566→+ schema
+   567→+ regras
+   568→        ↓
+   569→      modelo
+   570→        ↓
+   571→Project JSON candidato completo
+   572→```
+   573→
+   574→Contrato de retorno:
+   575→
+   576→```json
+   577→{
+   578→  "status": "ready",
+   579→  "explain": "resumo curto do que foi alterado",
+   580→  "assumptions": [
+   581→    "mantive a gaiola a 3000 mm do solo"
+   582→  ],
+   583→  "questions": [],
+   584→  "project": {
+   585→    "...": "ProjectDocument completo"
+   586→  }
+   587→}
+   588→```
+   589→
+   590→Quando faltar dado essencial:
+   591→
+   592→```json
+   593→{
+   594→  "status": "needs_input",
+   595→  "explain": "faltam medidas essenciais",
+   596→  "assumptions": [],
+   597→  "questions": [
+   598→    "Qual deve ser o pé-direito?"
+   599→  ],
+   600→  "project": null
+   601→}
+   602→```
+   603→
+   604→Máximo 3 perguntas.
+   605→
+   606→Não pedir respostas sobre coisas que podem ser preservadas do JSON atual.
+   607→
+   608→---
+   609→
+   610→# 12. DUAL PROVIDER DE IA
+   611→
+   612→Implementar **dois conectores nativos** desde o início:
+   613→
+   614→1. Google Gemini
+   615→2. Z.ai GLM
+   616→
+   617→A UI deve ter um modal semelhante ao conceito já usado no projeto anterior:
+   618→
+   619→```text
+   620→CONECTOR DE IA
+   621→
+   622→[ Google Gemini ]
+   623→Modelo: [ dropdown ]
+   624→API Key: [ ******** ]
+   625→[ ATIVAR GEMINI ]
+   626→
+   627→status:
+   628→Gemini ativo — Google Gemini — modelo X — respondeu em 0.78s
+   629→
+   630→
+   631→[ Z.ai ]
+   632→Modelo: [ dropdown ]
+   633→API Key: [ ******** ]
+   634→[ ATIVAR Z.AI ]
+   635→
+   636→status:
+   637→Z.ai ativo — GLM — modelo Y — respondeu em 1.10s
+   638→```
+   639→
+   640→Também mostrar:
+   641→
+   642→```text
+   643→CONEXÕES SALVAS
+   644→```
+   645→
+   646→As chaves ficam somente no backend local.
+   647→
+   648→Nunca persistir API key no frontend.
+   649→
+   650→Persistência local permitida:
+   651→
+   652→```text
+   653→data/ai_config.json
+   654→```
+   655→
+   656→Esse arquivo deve estar no `.gitignore`.
+   657→
+   658→---
+   659→
+   660→# 13. GEMINI
+   661→
+   662→Criar provider:
+   663→
+   664→```text
+   665→services/ai/gemini.py
+   666→```
+   667→
+   668→Usar SDK oficial `google-genai`.
+   669→
+   670→Configuração:
+   671→
+   672→```env
+   673→GEMINI_API_KEY=
+   674→GEMINI_MODEL=gemini-2.5-flash
+   675→```
+   676→
+   677→O modelo deve ser configurável.
+   678→
+   679→Default inicial do produto:
+   680→
+   681→```text
+   682→gemini-2.5-flash
+   683→```
+   684→
+   685→A UI deve permitir escolher outros modelos configurados.
+   686→
+   687→Usar structured output / JSON schema quando disponível.
+   688→
+   689→A resposta deve ser validada localmente por Pydantic.
+   690→
+   691→Timeout configurável.
+   692→
+   693→Retry:
+   694→
+   695→```text
+   696→máximo 1 retry
+   697→```
+   698→
+   699→para:
+   700→
+   701→- JSON inválido;
+   702→- schema inválido;
+   703→- erro transitório do provider.
+   704→
+   705→Nunca entrar em loop.
+   706→
+   707→---
+   708→
+   709→# 14. Z.AI
+   710→
+   711→Criar provider:
+   712→
+   713→```text
+   714→services/ai/zai.py
+   715→```
+   716→
+   717→Compatível com API Z.ai.
+   718→
+   719→Configuração:
+   720→
+   721→```env
+   722→ZAI_API_KEY=
+   723→ZAI_MODEL=glm-4.5-flash
+   724→```
+   725→
+   726→Default:
+   727→
+   728→```text
+   729→glm-4.5-flash
+   730→```
+   731→
+   732→A UI deve permitir trocar modelo.
+   733→
+   734→O provider precisa devolver o mesmo `AITransformResponse` usado pelo Gemini.
+   735→
+   736→Ou seja:
+   737→
+   738→```text
+   739→Gemini
+   740→Z.ai
+   741→```
+   742→
+   743→são intercambiáveis para o restante do sistema.
+   744→
+   745→Nenhuma regra CAD pode ficar dentro do provider.
+   746→
+   747→---
+   748→
+   749→# 15. REGISTRY DE PROVIDERS
+   750→
+   751→Criar:
+   752→
+   753→```python
+   754→AIProviderRegistry
+   755→```
+   756→
+   757→Interface:
+   758→
+   759→```python
+   760→transform_project(
+   761→    provider_id,
+   762→    current_project,
+   763→    user_request,
+   764→    attachments=None
+   765→) -> AITransformResponse
+   766→```
+   767→
+   768→Provider ativo deve ser configurável na UI.
+   769→
+   770→Mostrar na barra do Copiloto:
+   771→
+   772→```text
+   773→IA ativa: Gemini · gemini-2.5-flash
+   774→```
+   775→
+   776→ou:
+   777→
+   778→```text
+   779→IA ativa: Z.ai · glm-4.5-flash
+   780→```
+   781→
+   782→---
+   783→
+   784→# 16. ECONOMIA DE TOKENS
+   785→
+   786→O sistema deve ser projetado para gastar pouco contexto.
+   787→
+   788→Enviar para a IA apenas:
+   789→
+   790→1. prompt de sistema compacto;
+   791→2. JSON Schema compacto;
+   792→3. ProjectDocument atual;
+   793→4. pedido atual;
+   794→5. metadata necessária de preset quando explicitamente citado;
+   795→6. anexos quando existirem.
+   796→
+   797→Não enviar:
+   798→
+   799→- histórico inteiro do chat;
+   800→- logs;
+   801→- HTML;
+   802→- PDF exporter;
+   803→- código Python;
+   804→- operações disponíveis;
+   805→- documentação gigante;
+   806→- mensagens anteriores irrelevantes.
+   807→
+   808→Cada chamada deve ser stateless.
+   809→
+   810→O frontend pode mostrar histórico visual, mas o backend não precisa reenviar tudo.
+   811→
+   812→Para pedidos pequenos, o JSON atual + pedido é suficiente.
+   813→
+   814→---
+   815→
+   816→# 17. EDIÇÃO POR IA
+   817→
+   818→Exemplo:
+   819→
+   820→Projeto atual contém 2 postes.
+   821→
+   822→Usuário:
+   823→
+   824→```text
+   825→este painel agora não deverá ter postes,
+   826→deverá apenas ter sustentação de parede
+   827→```
+   828→
+   829→A IA deve devolver um novo ProjectDocument:
+   830→
+   831→- remove postes;
+   832→- remove interfaces que dependem deles;
+   833→- preserva painel/gaiola;
+   834→- cria elementos de fixação em parede quando necessário;
+   835→- registra assumptions.
+   836→
+   837→Não existe `delete_post`.
+   838→
+   839→Não existe `convert_to_wall`.
+   840→
+   841→Existe apenas:
+   842→
+   843→```text
+   844→JSON antes
+   845→→ JSON depois
+   846→```
+   847→
+   848→---
+   849→
+   850→# 18. DIFF AUTOMÁTICO
+   851→
+   852→O backend deve calcular o diff entre documentos.
+   853→
+   854→Função:
+   855→
+   856→```python
+   857→diff_projects(old, new)
+   858→```
+   859→
+   860→Retornar:
+   861→
+   862→```json
+   863→{
+   864→  "added": ["WALL-01", "WALL-02"],
+   865→  "removed": ["POST-01", "POST-02"],
+   866→  "modified": ["PANEL-LED"],
+   867→  "counts": {
+   868→    "added": 2,
+   869→    "removed": 2,
+   870→    "modified": 1
+   871→  }
+   872→}
+   873→```
+   874→
+   875→A IA não gera diff.
+   876→
+   877→O sistema calcula.
+   878→
+   879→---
+   880→
+   881→# 19. PREVIEW
+   882→
+   883→Fluxo:
+   884→
+   885→```text
+   886→JSON candidato
+   887→→ validação
+   888→→ renderer
+   889→→ ghost preview
+   890→→ diff visual
+   891→```
+   892→
+   893→Cores sugeridas:
+   894→
+   895→```text
+   896→adicionado = verde/translúcido
+   897→removido = vermelho/translúcido
+   898→modificado = laranja
+   899→inalterado = cinza normal
+   900→```
+   901→
+   902→Mostrar barra:
+   903→
+   904→```text
+   905→28 alterações propostas
+   906→27 novas · 1 editada · 0 removidas
+   907→
+   908→[ APLICAR ] [ CANCELAR ]
+   909→```
+   910→
+   911→---
+   912→
+   913→# 20. APPLY
+   914→
+   915→Ao clicar APLICAR:
+   916→
+   917→1. confirmar que `base_revision` ainda é a atual;
+   918→2. guardar snapshot completo do JSON atual;
+   919→3. substituir pelo JSON candidato;
+   920→4. incrementar revision;
+   921→5. renderizar novamente.
+   922→
+   923→Undo:
+   924→
+   925→```text
+   926→Ctrl+Z
+   927→```
+   928→
+   929→restaura o JSON anterior completo.
+   930→
+   931→Isso é muito mais simples que desfazer dezenas de operações individualmente.
+   932→
+   933→---
+   934→
+   935→# 21. HASH E CONCORRÊNCIA
+   936→
+   937→Cada projeto deve ter:
+   938→
+   939→```text
+   940→project_id
+   941→revision
+   942→project_hash
+   943→```
+   944→
+   945→`project_hash` = SHA-256 de JSON canônico.
+   946→
+   947→Cada transformação de IA recebe:
+   948→
+   949→```text
+   950→base_revision
+   951→base_hash
+   952→```
+   953→
+   954→Se o usuário modificar/aplicar algo antes do preview:
+   955→
+   956→```text
+   957→409 project changed
+   958→```
+   959→
+   960→e o preview precisa ser regenerado.
+   961→
+   962→---
+   963→
+   964→# 22. JSON EDITOR
+   965→
+   966→A UI precisa ter uma aba:
+   967→
+   968→```text
+   969→JSON DO PROJETO
+   970→```
+   971→
+   972→Funções:
+   973→
+   974→- visualizar;
+   975→- editar manualmente;
+   976→- formatar;
+   977→- validar;
+   978→- atualizar preview;
+   979→- copiar;
+   980→- importar;
+   981→- exportar.
+   982→
+   983→Isso é parte central do produto, não uma ferramenta escondida.
+   984→
+   985→---
+   986→
+   987→# 23. ENTRADA POR IMAGEM
+   988→
+   989→Arquitetura preparada para anexos.
+   990→
+   991→Fluxo:
+   992→
+   993→```text
+   994→imagem/croqui/foto
+   995→+ instrução
+   996→+ JSON atual ou blank
+   997→→ provider multimodal compatível
+   998→→ ProjectDocument candidato
+   999→```
+  1000→
+  1001→Não fingir precisão inexistente.
+  1002→
+  1003→Quando uma medida for inferida visualmente:
+  1004→
+  1005→```json
+  1006→{
+  1007→  "path": "panel.width",
+  1008→  "source": "visual_estimate",
+  1009→  "review_required": true,
+  1010→  "detail": "medida estimada pela proporção da imagem"
+  1011→}
+  1012→```
+  1013→
+  1014→Se o provider ativo não suportar imagem, mostrar:
+  1015→
+  1016→```text
+  1017→Este provider/modelo não suporta este tipo de anexo.
+  1018→```
+  1019→
+  1020→Não inventar suporte.
+  1021→
+  1022→---
+  1023→
+  1024→# 24. EXPLICAÇÃO PARA O OPERADOR
+  1025→
+  1026→Não mostrar chain-of-thought interno.
+  1027→
+  1028→Mostrar apenas:
+  1029→
+  1030→```text
+  1031→o que foi alterado
+  1032→assumptions
+  1033→perguntas pendentes
+  1034→```
+  1035→
+  1036→Exemplo:
+  1037→
+  1038→```text
+  1039→Removi os dois postes,
+  1040→mantive a gaiola a 3000 mm do solo
+  1041→e criei quatro pontos de fixação na parede.
+  1042→
+  1043→Assumi afastamento traseiro de 150 mm.
+  1044→```
+  1045→
+  1046→O operador pode responder:
+  1047→
+  1048→```text
+  1049→o afastamento deve ser 300 mm
+  1050→```
+  1051→
+  1052→Nova chamada:
+  1053→
+  1054→```text
+  1055→JSON atual
+  1056→+ correção
+  1057→→ novo JSON candidato
+  1058→```
+  1059→
+  1060→---
+  1061→
+  1062→# 25. SALVAR COMO EXEMPLO
+  1063→
+  1064→Adicionar opcionalmente:
+  1065→
+  1066→```text
+  1067→SALVAR COMO EXEMPLO
+  1068→```
+  1069→
+  1070→Guardar:
+  1071→
+  1072→```json
+  1073→{
+  1074→  "request": "...",
+  1075→  "before": {},
+  1076→  "after": {},
+  1077→  "operator_note": ""
+  1078→}
+  1079→```
+  1080→
+  1081→Destino:
+  1082→
+  1083→```text
+  1084→examples/
+  1085→```
+  1086→
+  1087→Esses exemplos podem futuramente ser usados como few-shot.
+  1088→
+  1089→Não fazer fine-tuning automático.
+  1090→
+  1091→---
+  1092→
+  1093→# 26. FRONTEND
+  1094→
+  1095→Visual semelhante ao produto anterior:
+  1096→
+  1097→- topbar grafite/navy;
+  1098→- fundo claro;
+  1099→- acento laranja;
+  1100→- viewport grande;
+  1101→- dock Copiloto à direita;
+  1102→- JSON em aba;
+  1103→- histórico curto;
+  1104→- chips contextuais.
+  1105→
+  1106→Dock:
+  1107→
+  1108→```text
+  1109→COPILOTO IA
+  1110→
+  1111→[ Copiloto ]
+  1112→[ JSON ]
+  1113→[ Presets ]
+  1114→
+  1115→histórico
+  1116→
+  1117→[ input ]
+  1118→[ anexar ]
+  1119→[ enviar ]
+  1120→
+  1121→IA ativa: Gemini · gemini-2.5-flash
+  1122→```
+  1123→
+  1124→Quando um elemento é selecionado, pode mostrar chips contextuais:
+  1125→
+  1126→```text
+  1127→duplicar
+  1128→mover
+  1129→trocar perfil
+  1130→excluir
+  1131→adicionar paralelo
+  1132→```
+  1133→
+  1134→Esses chips só preenchem uma instrução textual para a IA.
+  1135→
+  1136→Não executam handlers ocultos.
+  1137→
+  1138→---
+  1139→
+  1140→# 27. THREE.JS
+  1141→
+  1142→O renderer lê ProjectDocument.
+  1143→
+  1144→Suportar:
+  1145→
+  1146→- beam square → box orientado;
+  1147→- beam round → cylinder orientado;
+  1148→- cable → linha/cylinder fino;
+  1149→- plate → box;
+  1150→- panel → superfície translúcida;
+  1151→- surface → polygon/mesh simples.
+  1152→
+  1153→Vistas:
+  1154→
+  1155→```text
+  1156→3D
+  1157→Frente
+  1158→Fundo
+  1159→Esquerda
+  1160→Direita
+  1161→Superior
+  1162→Isométrica
+  1163→```
+  1164→
+  1165→Não mostrar `Inferior` por padrão.
+  1166→
+  1167→---
+  1168→
+  1169→# 28. PDF ÚNICO
+  1170→
+  1171→Um exporter PDF canônico.
+  1172→
+  1173→Pipeline:
+  1174→
+  1175→```text
+  1176→ProjectDocument
+  1177→→ projections
+  1178→→ dimensions
+  1179→→ plan_sheets
+  1180→→ LED Collor template
+  1181→→ PDF
+  1182→```
+  1183→
+  1184→A2 landscape.
+  1185→
+  1186→Folhas dinâmicas:
+  1187→
+  1188→1. frontal;
+  1189→2. traseira se relevante;
+  1190→3. lateral;
+  1191→4. superior;
+  1192→5. detalhe de suporte/base se relevante;
+  1193→6. isométrica.
+  1194→
+  1195→Aviso:
+  1196→
+  1197→```text
+  1198→ESBOÇO DE REFERÊNCIA GEOMÉTRICO — NÃO UTILIZAR PARA FABRICAÇÃO SEM REVISÃO TÉCNICA.
+  1199→```
+  1200→
+  1201→Não criar múltiplos exporters competindo.
+  1202→
+  1203→---
+  1204→
+  1205→# 29. BOM
+  1206→
+  1207→Derivar do JSON:
+  1208→
+  1209→- perfil;
+  1210→- quantidade;
+  1211→- comprimento;
+  1212→- comprimento total;
+  1213→- peso estimado.
+  1214→
+  1215→Sem preço no MVP.
+  1216→
+  1217→---
+  1218→
+  1219→# 30. API
+  1220→
+  1221→Criar:
+  1222→
+  1223→```text
+  1224→GET  /api/health
+  1225→GET  /api/meta
+  1226→GET  /api/project
+  1227→POST /api/project/new
+  1228→POST /api/project/import
+  1229→GET  /api/project/export
+  1230→
+  1231→GET  /api/presets
+  1232→GET  /api/presets/{id}
+  1233→POST /api/presets/load
+  1234→POST /api/presets/custom
+  1235→
+  1236→GET  /api/ai/providers
+  1237→GET  /api/ai/config
+  1238→POST /api/ai/config
+  1239→POST /api/ai/test
+  1240→POST /api/ai/transform
+  1241→
+  1242→POST /api/preview
+  1243→POST /api/apply
+  1244→POST /api/undo
+  1245→
+  1246→POST /api/export/pdf
+  1247→POST /api/export/bom
+  1248→```
+  1249→
+  1250→`/api/ai/transform` recebe:
+  1251→
+  1252→```json
+  1253→{
+  1254→  "provider": "gemini",
+  1255→  "request": "remova os postes e faça sustentação de parede",
+  1256→  "base_revision": 4,
+  1257→  "base_hash": "...",
+  1258→  "project": {}
+  1259→}
+  1260→```
+  1261→
+  1262→Resposta:
+  1263→
+  1264→```json
+  1265→{
+  1266→  "status": "ready",
+  1267→  "explain": "...",
+  1268→  "assumptions": [],
+  1269→  "questions": [],
+  1270→  "candidate_project": {},
+  1271→  "candidate_hash": "...",
+  1272→  "diff": {}
+  1273→}
+  1274→```
+  1275→
+  1276→---
+  1277→
+  1278→# 31. TIMEOUT E ERROS
+  1279→
+  1280→O projeto anterior teve:
+  1281→
+  1282→```text
+  1283→TimeoutError: The read operation timed out
+  1284→```
+  1285→
+  1286→Tratar isso corretamente.
+  1287→
+  1288→Nunca deixar frontend receber apenas:
+  1289→
+  1290→```text
+  1291→Failed to fetch
+  1292→```
+  1293→
+  1294→Retornar erros estruturados:
+  1295→
+  1296→```json
+  1297→{
+  1298→  "error": {
+  1299→    "type": "provider_timeout",
+  1300→    "provider": "zai",
+  1301→    "message": "O provider excedeu o tempo limite.",
+  1302→    "retryable": true
+  1303→  }
+  1304→}
+  1305→```
+  1306→
+  1307→Frontend mostra mensagem legível.
+  1308→
+  1309→Configurar timeout por provider.
+  1310→
+  1311→---
+  1312→
+  1313→# 32. TESTES ESSENCIAIS
+  1314→
+  1315→## Schema
+  1316→
+  1317→- JSON válido;
+  1318→- IDs únicos;
+  1319→- coordenadas finitas;
+  1320→- perfil conhecido;
+  1321→- elementos inválidos falham.
+  1322→
+  1323→## Diff
+  1324→
+  1325→Antes:
+  1326→
+  1327→```text
+  1328→POST-01
+  1329→POST-02
+  1330→```
+  1331→
+  1332→Depois:
+  1333→
+  1334→```text
+  1335→WALL-01
+  1336→WALL-02
+  1337→```
+  1338→
+  1339→Diff correto.
+  1340→
+  1341→## Apply/Undo
+  1342→
+  1343→```text
+  1344→apply JSON candidato
+  1345→→ revision +1
+  1346→→ undo
+  1347→→ JSON original idêntico
+  1348→```
+  1349→
+  1350→## Gemini mock
+  1351→
+  1352→- ready;
+  1353→- needs_input;
+  1354→- JSON inválido;
+  1355→- timeout;
+  1356→- retry único.
+  1357→
+  1358→## Z.ai mock
+  1359→
+  1360→Mesmos contratos.
+  1361→
+  1362→## API
+  1363→
+  1364→- health;
+  1365→- config provider;
+  1366→- transform;
+  1367→- preview;
+  1368→- apply;
+  1369→- undo.
+  1370→
+  1371→---
+  1372→
+  1373→# 33. CASOS DE ACEITE
+  1374→
+  1375→## Caso A — criar estrutura
+  1376→
+  1377→Pedido:
+  1378→
+  1379→```text
+  1380→Crie um painel outdoor de 1920x960,
+  1381→1 poste central,
+  1382→pé-direito 3m,
+  1383→gaiola 650,
+  1384→passarela traseira 650,
+  1385→guarda-corpo 1100.
+  1386→```
+  1387→
+  1388→Esperado:
+  1389→
+  1390→- JSON completo;
+  1391→- painel 1920×960;
+  1392→- poste X=0;
+  1393→- poste termina Z=3000;
+  1394→- gaiola base Z=3000;
+  1395→- passarela atrás;
+  1396→- rail 1100;
+  1397→- preview coerente.
+  1398→
+  1399→## Caso B — converter suporte
+  1400→
+  1401→Projeto atual tem 2 postes.
+  1402→
+  1403→Pedido:
+  1404→
+  1405→```text
+  1406→este painel agora não deverá ter mais postes
+  1407→deverá apenas ter sustentação de parede
+  1408→```
+  1409→
+  1410→Esperado:
+  1411→
+  1412→- postes removidos;
+  1413→- interfaces dependentes removidas;
+  1414→- suporte de parede criado;
+  1415→- painel/gaiola preservados;
+  1416→- diff claro;
+  1417→- preview antes de aplicar.
+  1418→
+  1419→## Caso C — cabo por coluna
+  1420→
+  1421→Pedido:
+  1422→
+  1423→```text
+  1424→preciso que ele tenha cabos para fixação
+  1425→1 por coluna
+  1426→```
+  1427→
+  1428→Esperado:
+  1429→
+  1430→- IA analisa colunas existentes;
+  1431→- cria `cable` elements;
+  1432→- um cabo por coluna;
+  1433→- sem necessidade de novo handler.
+  1434→
+  1435→## Caso D — redimensionar
+  1436→
+  1437→Pedido:
+  1438→
+  1439→```text
+  1440→transforme o painel em 4x2 mantendo a lógica atual
+  1441→```
+  1442→
+  1443→A IA altera o JSON inteiro mantendo coerência.
+  1444→
+  1445→Nenhum erro de:
+  1446→
+  1447→```text
+  1448→operation desconhecida
+  1449→campo group inválido
+  1450→add_post não aceita ...
+  1451→```
+  1452→
+  1453→porque não existe contrato de operações.
+  1454→
+  1455→---
+  1456→
+  1457→# 34. OTIMIZAÇÃO DE TOKENS
+  1458→
+  1459→O prompt do provider deve ser curto.
+  1460→
+  1461→Enviar apenas:
+  1462→
+  1463→```text
+  1464→SYSTEM RULES compactas
+  1465→PROJECT JSON
+  1466→USER REQUEST
+  1467→SCHEMA
+  1468→```
+  1469→
+  1470→Não mandar história inteira.
+  1471→
+  1472→Não mandar documentação do app.
+  1473→
+  1474→Não mandar lista de handlers.
+  1475→
+  1476→Não mandar frontend.
+  1477→
+  1478→Não mandar logs.
+  1479→
+  1480→Em edições pequenas, o modelo recebe um documento compacto e devolve o documento completo.
+  1481→
+  1482→Se o JSON crescer muito no futuro, implementar compactação estrutural ou representação resumida, mas NÃO antes de medir.
+  1483→
+  1484→---
+  1485→
+  1486→# 35. MILESTONES
+  1487→
+  1488→## M1 — Bootstrap
+  1489→- FastAPI
+  1490→- single server
+  1491→- frontend mínimo
+  1492→- Git
+  1493→
+  1494→Commit:
+  1495→
+  1496→```text
+  1497→chore: bootstrap json cad
+  1498→```
+  1499→
+  1500→## M2 — ProjectDocument
+  1501→- schema
+  1502→- element types
+  1503→- profiles
+  1504→- hashing
+  1505→- validation
+  1506→
+  1507→Commit:
+  1508→
+  1509→```text
+  1510→feat: add canonical project document
+  1511→```
+  1512→
+  1513→## M3 — Renderer
+  1514→- Three.js
+  1515→- JSON → geometry
+  1516→- cameras/views
+  1517→
+  1518→Commit:
+  1519→
+  1520→```text
+  1521→feat: render project json in 3d
+  1522→```
+  1523→
+  1524→## M4 — Project lifecycle
+  1525→- current project
+  1526→- import/export
+  1527→- revision/hash
+  1528→- undo snapshot
+  1529→
+  1530→Commit:
+  1531→
+  1532→```text
+  1533→feat: add project lifecycle and undo
+  1534→```
+  1535→
+  1536→## M5 — Presets
+  1537→- four references
+  1538→- load/save custom
+  1539→
+  1540→Commit:
+  1541→
+  1542→```text
+  1543→feat: add json reference presets
+  1544→```
+  1545→
+  1546→## M6 — Diff + Preview
+  1547→- project diff
+  1548→- candidate preview
+  1549→- apply
+  1550→
+  1551→Commit:
+  1552→
+  1553→```text
+  1554→feat: preview and apply full project json
+  1555→```
+  1556→
+  1557→## M7 — Gemini
+  1558→- config
+  1559→- activation
+  1560→- test
+  1561→- transform
+  1562→
+  1563→Commit:
+  1564→
+  1565→```text
+  1566→feat: add gemini project transformer
+  1567→```
+  1568→
+  1569→## M8 — Z.ai
+  1570→- config
+  1571→- activation
+  1572→- test
+  1573→- transform
+  1574→
+  1575→Commit:
+  1576→
+  1577→```text
+  1578→feat: add zai project transformer
+  1579→```
+  1580→
+  1581→## M9 — Copilot UI
+  1582→- provider modal
+  1583→- history
+  1584→- chips
+  1585→- JSON tab
+  1586→
+  1587→Commit:
+  1588→
+  1589→```text
+  1590→feat: add json copilot workflow
+  1591→```
+  1592→
+  1593→## M10 — PDF/BOM
+  1594→- one PDF
+  1595→- BOM
+  1596→
+  1597→Commit:
+  1598→
+  1599→```text
+  1600→feat: export approved json projects
+  1601→```
+  1602→
+  1603→## M11 — Browser validation
+  1604→- validate complete flows
+  1605→- cleanup
+  1606→- docs
+  1607→
+  1608→Commit:
+  1609→
+  1610→```text
+  1611→chore: validate json cad end to end
+  1612→```
+  1613→
+  1614→---
+  1615→
+  1616→# 36. DEFINITION OF DONE
+  1617→
+  1618→O projeto só está concluído quando:
+  1619→
+  1620→1. `py main.py` abre localhost:3000;
+  1621→2. existe apenas um servidor;
+  1622→3. ProjectDocument é a fonte de verdade;
+  1623→4. canvas é derivado do JSON;
+  1624→5. JSON editor funciona;
+  1625→6. Gemini pode ser configurado/ativado;
+  1626→7. Z.ai pode ser configurado/ativado;
+  1627→8. provider ativo aparece na UI;
+  1628→9. IA recebe JSON atual + pedido;
+  1629→10. IA devolve JSON completo candidato;
+  1630→11. backend valida;
+  1631→12. backend calcula diff;
+  1632→13. preview mostra candidato;
+  1633→14. aplicar substitui JSON atual;
+  1634→15. undo restaura JSON anterior;
+  1635→16. nenhum fluxo depende de `add_post`, `move_element`, etc.;
+  1636→17. presets são JSON completos;
+  1637→18. PDF único funciona;
+  1638→19. BOM funciona;
+  1639→20. erros de provider aparecem de forma legível;
+  1640→21. browser validation executada.
+  1641→
+  1642→---
+  1643→
+  1644→# 37. NÃO NEGOCIÁVEIS
+  1645→
+  1646→1. JSON do projeto é a autoridade.
+  1647→2. IA transforma documentos, não executa mini-operações.
+  1648→3. Provider não conhece regras de UI.
+  1649→4. Gemini e Z.ai usam o mesmo contrato.
+  1650→5. Canvas nunca é a fonte de verdade.
+  1651→6. Preview antes de Apply.
+  1652→7. Diff calculado pelo sistema.
+  1653→8. Undo = snapshot JSON anterior.
+  1654→9. IDs estáveis.
+  1655→10. Coordenadas em mm.
+  1656→11. Um servidor.
+  1657→12. Sem Next.js.
+  1658→13. Sem `ai_ops`.
+  1659→14. Sem `local_edit/global_resize`.
+  1660→15. Sem memória conversacional backend.
+  1661→16. Sem selecionar preset por dimensão comum.
+  1662→17. Assumptions visíveis.
+  1663→18. Não inventar medidas sem registrar assumption.
+  1664→19. Sem arquivos paralelos `v2/new/final2`.
+  1665→20. Não transformar `main.py`/`index.html` em monólitos.
+  1666→
+  1667→---
+  1668→
+  1669→# 38. RELATÓRIO FINAL
+  1670→
+  1671→Ao terminar, responder:
+  1672→
+  1673→```text
+  1674→STATUS
+  1675→ARQUITETURA
+  1676→PROJECT JSON
+  1677→PROVIDERS
+  1678→COMO RODAR
+  1679→TESTES
+  1680→VALIDAÇÃO VISUAL
+  1681→COMMITS
+  1682→LIMITAÇÕES REAIS
+  1683→```
+  1684→
+  1685→Não terminar com sugestões genéricas.
+  1686→
+  1687→Entregue o projeto funcionando.
+  1688→
