@@ -19,6 +19,8 @@ import {
 import { toast } from "sonner";
 import Viewer3D from "@/components/cad/Viewer3D";
 import { CopilotDock, type DockTab } from "@/components/cad/CopilotDock";
+import { MobileAiBar } from "@/components/cad/MobileAiBar";
+import { MobileSheet } from "@/components/cad/MobileSheet";
 import { ProviderModal } from "@/components/cad/ProviderModal";
 import { BomDialog } from "@/components/cad/BomDialog";
 import { VIEW_LABELS, VIEWS, type StatusMap, type ViewMode } from "@/components/cad/sceneBuilder";
@@ -74,6 +76,8 @@ export default function Home() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("iso");
   const [tab, setTab] = useState<DockTab>("copiloto");
+  // bottom sheet mobile (dock deslizante em telas < lg)
+  const [sheetOpen, setSheetOpen] = useState(false);
   const [providerModalOpen, setProviderModalOpen] = useState(false);
   const [bomOpen, setBomOpen] = useState(false);
   const [providerLabel, setProviderLabel] = useState("carregando…");
@@ -369,6 +373,7 @@ export default function Home() {
       pushHistory({ role: "user", text });
       setSending(true);
       setCandidate(null);
+      setSheetOpen(false); // mobile: libera o viewport para acompanhar o progresso nos chips
       // pede permissão de notificação no envio (contexto: resposta pode levar ~2 min)
       try {
         if (typeof Notification !== "undefined" && Notification.permission === "default") {
@@ -736,11 +741,51 @@ export default function Home() {
   /** comparação A/B ativa (dois viewports) — só no fluxo de restauração de revisão */
   const splitActive = restoreInfo !== null && compareMode === "split" && candidate !== null;
 
+  // mobile UX: quando a IA termina, colapsa o sheet para o preview 3D + APLICAR ficarem visíveis
+  const candidateHashKey = candidate?.hash ?? null;
+  useEffect(() => {
+    if (candidateHashKey) setSheetOpen(false);
+  }, [candidateHashKey]);
+
+  // instância única do dock reaproveitada no desktop (lateral) e no mobile (bottom sheet)
+  const dockElement = project ? (
+    <CopilotDock
+      tab={tab}
+      onTabChange={setTab}
+      history={history}
+      sending={sending}
+      onSend={(t, a) => void sendRequest(t, a)}
+      project={project}
+      projectKey={`${projectState!.revision}:${projectState!.hash.slice(0, 8)}`}
+      onPreviewCandidate={previewCandidate}
+      selectedElement={selectedElement}
+      activeProviderLabel={providerLabel}
+      activeVision={activeVision}
+      onOpenProviders={() => setProviderModalOpen(true)}
+      onOpenJsonTab={() => setTab("json")}
+      onAppliedCandidate={() => void refresh()}
+      selectedId={selectedId}
+      onSelect={setSelectedId}
+      hiddenIds={hiddenIds}
+      onToggleHidden={toggleHidden}
+      onIsolateGroup={isolateGroup}
+      isolatedGroup={isolatedGroup}
+      onFocusElement={focusElement}
+      onClearHistory={clearCopilotHistory}
+      onProviderChanged={() => void refreshProviderInfo()}
+      candidateDoc={candidate?.project ?? null}
+      comparingRev={comparingRev}
+      onCompareRevision={(rev) => void compareRevision(rev)}
+      historyRefreshKey={historyRefreshKey}
+      onRevisionRestored={() => void refresh()}
+    />
+  ) : null;
+
   return (
     <TooltipProvider>
       <div className="h-screen flex flex-col bg-slate-100 text-slate-900">
         {/* ---------- TOPBAR ---------- */}
-        <header className="flex items-center gap-2 px-3 sm:px-4 h-14 bg-gradient-to-r from-[#141f2b] via-[#1b2836] to-[#223344] text-slate-100 shrink-0 border-b-4 border-orange-600 shadow-md" role="banner">
+        <header className="flex items-center gap-2 px-2 sm:px-4 h-14 bg-gradient-to-r from-[#141f2b] via-[#1b2836] to-[#223344] text-slate-100 shrink-0 border-b-4 border-orange-600 shadow-md overflow-x-clip" role="banner">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="h-8 w-8 rounded bg-orange-600 grid place-items-center font-black text-white text-sm shrink-0" aria-hidden>
               LC
@@ -928,7 +973,7 @@ export default function Home() {
         {/* ---------- MAIN ---------- */}
         <main className="flex-1 flex flex-col lg:flex-row min-h-0" role="main">
           {/* VIEWPORT */}
-          <section className="relative flex-1 min-h-[45vh] lg:min-h-0 bg-slate-100" aria-label="Viewport 3D">
+          <section className="relative flex-1 min-h-[220px] lg:min-h-0 bg-slate-100" aria-label="Viewport 3D">
             {project ? (
               <div className={`absolute inset-0 ${splitActive ? "invisible" : ""}`} aria-hidden={splitActive}>
                 <Viewer3DNoSSR
@@ -1263,9 +1308,9 @@ export default function Home() {
             </AnimatePresence>
           </section>
 
-          {/* DOCK (redimensionável em lg+) */}
+          {/* DOCK (redimensionável em lg+) — em telas menores o dock vive no bottom sheet mobile */}
           <div
-            className="relative h-[46vh] lg:h-auto min-h-0 shrink-0 w-full lg:w-[var(--dock-w)]"
+            className="relative hidden lg:block lg:h-auto min-h-0 shrink-0 w-full lg:w-[var(--dock-w)]"
             style={{ "--dock-w": `${dockWidth}px` } as React.CSSProperties}
             data-dock-wrap
           >
@@ -1314,39 +1359,30 @@ export default function Home() {
               <div className="h-full w-full rounded-full bg-slate-300/50 group-hover:bg-orange-500/60 group-focus-visible:bg-orange-500 transition-colors" />
             </div>
             <div className="h-full w-full" style={{ width: "100%" }} data-dock-inner>
-              {project && (
-                <CopilotDock
-                  tab={tab}
-                  onTabChange={setTab}
-                  history={history}
-                  sending={sending}
-                  onSend={(t, a) => void sendRequest(t, a)}
-                  project={project}
-                  projectKey={`${projectState!.revision}:${projectState!.hash.slice(0, 8)}`}
-                  onPreviewCandidate={previewCandidate}
-                  selectedElement={selectedElement}
-                  activeProviderLabel={providerLabel}
-                  activeVision={activeVision}
-                  onOpenProviders={() => setProviderModalOpen(true)}
-                  onOpenJsonTab={() => setTab("json")}
-                  onAppliedCandidate={() => void refresh()}
-                  selectedId={selectedId}
-                  onSelect={setSelectedId}
-                  hiddenIds={hiddenIds}
-                  onToggleHidden={toggleHidden}
-                  onIsolateGroup={isolateGroup}
-                  isolatedGroup={isolatedGroup}
-                  onFocusElement={focusElement}
-                  onClearHistory={clearCopilotHistory}
-                  onProviderChanged={() => void refreshProviderInfo()}
-                  candidateDoc={candidate?.project ?? null}
-                  comparingRev={comparingRev}
-                  onCompareRevision={(rev) => void compareRevision(rev)}
-                  historyRefreshKey={historyRefreshKey}
-                  onRevisionRestored={() => void refresh()}
-                />
-              )}
+              {dockElement}
             </div>
+          </div>
+
+          {/* MOBILE: ações rápidas mapeadas à IA real do servidor + bottom sheet com o mesmo dock */}
+          <div className="lg:hidden shrink-0 flex flex-col">
+            <MobileAiBar
+              busy={sending}
+              providerLabel={providerLabel}
+              onQuick={(prompt) => void sendRequest(prompt, [])}
+              onOpenCopilot={() => {
+                setTab("copiloto");
+                setSheetOpen(true);
+              }}
+            />
+            <MobileSheet
+              open={sheetOpen}
+              onOpenChange={setSheetOpen}
+              tab={tab}
+              onTabChange={setTab}
+              badge={candidate ? "1" : null}
+            >
+              {dockElement}
+            </MobileSheet>
           </div>
         </main>
 
