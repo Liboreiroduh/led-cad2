@@ -5,7 +5,7 @@
  * Cada revisão pode ser COMPARADA com a atual (diff ghost no 3D) e restaurada
  * via fluxo padrão de preview → aplicar.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   History, RefreshCw, Loader2, GitCompare, Sparkles, Braces, Upload, FileJson,
   Undo2, RotateCcw, FilePlus2, Circle, Monitor, FileText, Pencil, Search, ListFilter, Download,
@@ -64,6 +64,28 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
   const [pdfBusy, setPdfBusy] = useState<number | null>(null);
   const [filter, setFilter] = useState<string>("all");
   const [query, setQuery] = useState("");
+  // confirmação em 2 cliques para RESTAURAR (evita restauração acidental ao clicar na timeline)
+  const [confirmRestore, setConfirmRestore] = useState<number | null>(null);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const armRestore = useCallback((rev: number) => {
+    setConfirmRestore(rev);
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+    confirmTimerRef.current = setTimeout(() => setConfirmRestore(null), 3000);
+  }, []);
+
+  const disarmRestore = useCallback(() => {
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+    confirmTimerRef.current = null;
+    setConfirmRestore(null);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+    },
+    [],
+  );
 
   /** Exporta as revisões EXIBIDAS (filtro + busca aplicados) como CSV — “;” + BOM p/ Excel pt-BR. */
   const exportCsv = () => {
@@ -149,6 +171,12 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
   }, [revisions, filter, query]);
 
   const restore = async (rev: number) => {
+    // 1º clique arma a confirmação (3s); 2º clique confirma
+    if (confirmRestore !== rev) {
+      armRestore(rev);
+      return;
+    }
+    disarmRestore();
     setRestoring(rev);
     try {
       const st = await api.restoreRevision(rev);
@@ -291,7 +319,10 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
                         size="sm"
                         variant="outline"
                         className="h-6 px-2 text-[10px] font-semibold border-slate-300 text-slate-600 hover:border-orange-400 hover:text-orange-700"
-                        onClick={() => onCompare(r.revision)}
+                        onClick={() => {
+                          disarmRestore();
+                          onCompare(r.revision);
+                        }}
                         disabled={comparingRev !== null}
                         title="Mostrar diff desta revisão contra a atual no 3D"
                       >
@@ -301,13 +332,21 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
                       <Button
                         size="sm"
                         variant="outline"
-                        className="h-6 px-2 text-[10px] font-semibold border-slate-300 text-slate-600 hover:border-rose-400 hover:text-rose-700"
+                        className={`h-6 px-2 text-[10px] font-semibold transition-all ${
+                          confirmRestore === r.revision
+                            ? "border-red-500 bg-red-50 text-red-700 font-black shadow-sm animate-pulse"
+                            : "border-slate-300 text-slate-600 hover:border-rose-400 hover:text-rose-700"
+                        }`}
                         onClick={() => void restore(r.revision)}
                         disabled={restoring !== null || comparingRev !== null}
-                        title="Restaurar este documento como nova revisão"
+                        title={
+                          confirmRestore === r.revision
+                            ? `Clique de novo para CONFIRMAR a restauração da rev ${r.revision}`
+                            : "Restaurar este documento como nova revisão (pede confirmação)"
+                        }
                       >
                         {restoring === r.revision ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
-                        RESTAURAR
+                        {confirmRestore === r.revision ? "CONFIRMAR?" : "RESTAURAR"}
                       </Button>
                       <Button
                         size="sm"

@@ -84,6 +84,19 @@ export interface RevisionListItem {
   is_current: boolean;
 }
 
+export interface PresencePeer {
+  id: string;
+  label: string;
+  last_seen_s: number;
+}
+
+export interface PresenceResult {
+  revision: number;
+  hash: string;
+  updated_at: string;
+  peers: PresencePeer[];
+}
+
 export interface RevisionDocResult {
   revision: number;
   hash: string;
@@ -98,7 +111,10 @@ export interface RevisionDocResult {
 export const api = {
   health: () => call<{ ok: boolean; revision: number }>("/api/health"),
   /** presença multi-operador: contadores leves para polling (sem o documento) */
-  presence: () => call<{ revision: number; hash: string; updated_at: string }>("/api/presence"),
+  presence: () => call<PresenceResult>("/api/presence"),
+  /** heartbeat de presença com identidade: registra o cliente e devolve peers ativos */
+  presencePing: (client_id: string) =>
+    call<PresenceResult>("/api/presence", { method: "POST", body: JSON.stringify({ client_id }) }),
   meta: () =>
     call<{
       active_provider: string;

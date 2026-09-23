@@ -22,7 +22,7 @@ import { CopilotDock, type DockTab } from "@/components/cad/CopilotDock";
 import { ProviderModal } from "@/components/cad/ProviderModal";
 import { BomDialog } from "@/components/cad/BomDialog";
 import { VIEW_LABELS, VIEWS, type StatusMap, type ViewMode } from "@/components/cad/sceneBuilder";
-import { api, ApiCallError, type ProjectState, type TransformResult, type PreviewResult } from "@/lib/cad/client-api";
+import { api, ApiCallError, type ProjectState, type TransformResult, type PreviewResult, type PresencePeer } from "@/lib/cad/client-api";
 import { estimateElementWeightKg } from "@/lib/cad/bom";
 import type { ProjectDiff, ProjectDocument } from "@/lib/cad/schema";
 import type { HistoryItem } from "@/components/cad/types";
@@ -51,6 +51,7 @@ interface CandidateState {
 const HISTORY_KEY_PREFIX = "led-json-cad:history:v2";
 const HISTORY_KEY_LEGACY = "led-json-cad:history:v1";
 const DOCK_WIDTH_KEY = "led-json-cad:dockwidth:v1";
+const CLIENT_ID_KEY = "led-json-cad:client-id:v1";
 const DOCK_MIN = 320;
 const DOCK_MAX = 680;
 const DOCK_DEFAULT = 390;
@@ -106,6 +107,24 @@ export default function Home() {
   const remoteChangeRef = useRef<{ revision: number; hash: string; updated_at: string } | null>(null);
   const mutatingRef = useRef(false);
   const projectStateRef = useRef<ProjectState | null>(null);
+  // identidade local deste operador (persistida no navegador) — alimenta o heartbeat
+  const [peers, setPeers] = useState<PresencePeer[]>([]);
+  const clientIdRef = useRef<string | null>(null);
+  const getClientId = useCallback((): string => {
+    if (clientIdRef.current) return clientIdRef.current;
+    try {
+      let id = localStorage.getItem(CLIENT_ID_KEY);
+      if (!id) {
+        id = crypto?.randomUUID?.() ?? `op-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        localStorage.setItem(CLIENT_ID_KEY, id);
+      }
+      clientIdRef.current = id;
+      return id;
+    } catch {
+      clientIdRef.current = "op-anonimo";
+      return "op-anonimo";
+    }
+  }, []);
 
   // arraste da alça de redimensionamento do dock (desktop)
   useEffect(() => {
@@ -209,8 +228,9 @@ export default function Home() {
     void refreshProviderInfo();
   }, [refresh, refreshProviderInfo]);
 
-  // ---------- presença multi-operador (polling leve em /api/presence) ----------
-  // Detecta alterações feitas por outra sessão/aba no mesmo store do servidor.
+  // ---------- presença multi-operador (heartbeat em /api/presence) ----------
+  // Cada ciclo faz POST com a identidade local (estou vivo) e recebe de volta
+  // rev/hash (detecção de mudança remota) + lista de peers ativos (últimos 30s).
   // Hash igual → em sincronia; rev do servidor MAIOR → outro operador aplicou;
   // rev MENOR → resposta antiga de mutação própria em voo (descartada).
   // Mutações próprias pausam a detecção (mutatingRef) para não gerar falso alerta.
@@ -223,8 +243,9 @@ export default function Home() {
     const tick = async () => {
       if (!alive) return;
       try {
-        const p = await api.presence();
+        const p = await api.presencePing(getClientId());
         if (!alive || !p) return;
+        setPeers(p.peers ?? []);
         const local = projectStateRef.current;
         if (local && !mutatingRef.current) {
           if (p.hash === local.hash) {
@@ -247,7 +268,7 @@ export default function Home() {
       }
       if (alive) schedule(document.visibilityState === "hidden" ? 20000 : 6000);
     };
-    schedule(4000);
+    schedule(3000);
     const onVis = () => {
       if (document.visibilityState === "visible" && timer) {
         clearTimeout(timer);
@@ -260,7 +281,7 @@ export default function Home() {
       if (timer) clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, []);
+  }, [getClientId]);
 
   // ref síncrono do restoreInfo para uso no handler de teclado (evita stale closure)
   const restoreInfoRef = useRef<number | null>(null);
@@ -824,7 +845,7 @@ export default function Home() {
               <Badge variant="outline" className="text-slate-400 border-slate-600">
                 {project.elements.length} el.
               </Badge>
-              {/* presença multi-operador — verde quando em sincronia, âmbar pulsante quando outro operador alterou */}
+              {/* presença multi-operador — contagem de operadores + alerta de mudança remota */}
               <AnimatePresence>
                 {remoteChange ? (
                   <motion.button
@@ -834,10 +855,10 @@ export default function Home() {
                     exit={{ opacity: 0, scale: 0.9 }}
                     transition={{ duration: 0.18 }}
                     onClick={() => void syncFromServer()}
-                    className="hidden xl:inline-flex items-center gap-1.5 h-6 px-2 rounded-full bg-amber-400/15 border border-amber-400/60 text-amber-300 text-[10px] font-bold tracking-wide hover:bg-amber-400/25 active:scale-95 transition-all outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+                    className="hidden xl:inline-flex items-center gap-1.5 h-6 px-2 rounded-full bg-amber-400/15 border border-amber-400/60 text-amber-300 text-[10px] font-bold tracking-wide whitespace-nowrap hover:bg-amber-400/25 active:scale-95 transition-all outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
                     title={`Servidor na rev ${remoteChange.revision} (atualizado ${agoShort(remoteChange.updated_at)} atrás) — clique para sincronizar`}
                   >
-                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400 cad-pulse-soft" aria-hidden />
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400 cad-pulse-soft shrink-0" aria-hidden />
                     OUTRO OPERADOR · rev {remoteChange.revision}
                     <span className="text-amber-200/80 font-black">↻</span>
                   </motion.button>
@@ -847,11 +868,31 @@ export default function Home() {
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
-                    className="hidden xl:inline-flex items-center gap-1.5 h-6 px-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-300/90 text-[10px] font-semibold"
-                    title="Em sincronia com o servidor — verificação automática a cada 6s"
+                    className={`hidden xl:inline-flex items-center gap-1.5 h-6 px-2 rounded-full border whitespace-nowrap text-[10px] font-semibold ${
+                      peers.filter((p) => p.id !== getClientId()).length > 0
+                        ? "border-emerald-500/30 bg-emerald-500/10 text-slate-200"
+                        : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300/90"
+                    }`}
+                    title={presenceTooltip(peers, getClientId())}
                   >
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
-                    SINCRONIZADO
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full shrink-0 ${peers.filter((p) => p.id !== getClientId()).length > 0 ? "bg-orange-400 cad-pulse-soft" : "bg-emerald-400"}`}
+                      aria-hidden
+                    />
+                    {peers.filter((p) => p.id !== getClientId()).length > 0
+                      ? `${peers.length} OPERADORES`
+                      : "SINCRONIZADO"}
+                    {peers
+                      .filter((p) => p.id !== getClientId())
+                      .slice(0, 2)
+                      .map((p) => (
+                        <span
+                          key={p.id}
+                          className="h-2 w-2 rounded-full border border-white/40 shrink-0"
+                          style={{ backgroundColor: peerColor(p.id) }}
+                          aria-hidden
+                        />
+                      ))}
                   </motion.span>
                 )}
               </AnimatePresence>
@@ -1502,4 +1543,21 @@ function agoShort(iso: string): string {
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.floor(s / 60)}min`;
   return `${Math.floor(s / 3600)}h`;
+}
+
+/** cor determinística por operador (hue derivado do id) — dots de presença */
+function peerColor(id: string): string {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
+  return `hsl(${h} 72% 55%)`;
+}
+
+/** tooltip da pill de presença: lista quem está ativo agora */
+function presenceTooltip(peers: PresencePeer[], myId: string): string {
+  const others = peers.filter((p) => p.id !== myId);
+  if (others.length === 0) {
+    return "Em sincronia com o servidor — você é o único operador ativo agora (heartbeat a cada 6s)";
+  }
+  const list = ["Você", ...others.map((p) => `${p.label} (ativo há ${p.last_seen_s}s)`)];
+  return `Operadores ativos agora: ${list.join(" · ")}`;
 }
