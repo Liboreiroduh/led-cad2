@@ -219,3 +219,17 @@ Stage Summary:
 - MOBILE É PLENAMENTE OPERACIONAL: navegação por polegar (bottom nav 52px), bottom sheet com o MESMO dock do desktop (copiloto, JSON, presets, elementos, histórico), e botões de 1 toque que acionam a IA REAL glm-4.5v no servidor.
 - IA Z.ai FUNCIONAL NO SERVIDOR — provas em andamento nesta rodada: (1) teste de conectividade 0.37s ok; (2) transform real via curl em background; (3) transform real disparado PELO CHIP MOBILE "Luminária" no agent-browser (PROCESSANDO·Ns visível) → resultado a confirmar no fim da rodada.
 - Desktop 100% preservado (dock lateral lg+, nenhum comportamento alterado).
+- QA agent-browser (390×844) — VERIFICADO E2E COM IA REAL:
+  (1) Mobile render: barra "IA NO SERVIDOR · Z.AI · GLM-4.5V" + 6 chips + IA LIVRE + bottom nav 6 colunas — sem scroll horizontal;
+  (2) Bottom sheet: abrir/fechar via aba e chevron, ELEMENTOS com árvore de 52 elementos dentro do sheet, alça de colapso funcional;
+  (3) CICLO IA REAL PELO MOBILE: chip "Luminária" → badge "PROCESSANDO · 2s→83s" (cronômetro visível) → ~100s depois glm-4.5v retornou "4 alterações propostas" (diff +4/~0/-0, few-shot aplicado) → preview 3D com fantasma verde + barra APLICAR/CANCELAR + badge "1" na aba IA + sheet auto-colapsado → APLICAR → toast "Aplicado — revision 30" com Desfazer;
+  (4) Desktop 1440×900: dock lateral intacto, 56 el. (52+4 da IA), pill "2 OPERADORES", zero vazamento de UI mobile (lg:hidden correto), estado de aba contínuo mobile↔desktop.
+- Resultado final do servidor: rev 30 (hash 5b68e952, 56 el., 24 revisões) — a luminária adicionada pela IA fica como demonstração visível (Desfazer reverte com 1 toque).
+- Nota honesta: o transform de controle disparado por curl em background não gravou arquivo (processo nohup morreu silenciosamente) — a prova E2E definitiva foi o ciclo real pelo chip mobile acima.
+
+Stage Summary (round 10 / final):
+- ENTREGA CENTRAL: versão mobile completa com botões mapeados à IA FUNCIONAL do Z.ai — o usuário agora vê, com 1 toque, a glm-4.5v processando no servidor (cronômetro), recebendo o diff, visualizando o preview 3D e aplicando como nova revisão.
+- Arquitetura: dockElement único compartilhado entre dock desktop e bottom sheet mobile — zero duplicação de lógica; MobileAiBar/MobileSheet isolados em componentes próprios (<lg only via CSS, sem JS de detecção).
+- Provas da IA Z.ai funcional: /api/ai/test 0.37s ok + ciclo completo mobile→servidor→rev 30.
+- Riscos: transform de ~100s exige paciência no mobile (badge PROCESSANDO mitiga; notificação de sistema já existente ajuda); sheet 46vh + alça podem ser refinados com drag contínuo (snap points) no futuro.
+- Próximos passos sugeridos: 1) drag contínuo do sheet com snap points (peek/meio/fim); 2) diff entre duas revisões quaisquer (item pendente da rodada 9); 3) teste de screenshot automático de regressão de viewport; 4) badge de sincronia "há Xs" no rodapé mobile; 5) suporte a anexo de foto no mobile (câmera → vision glm-4.5v).
