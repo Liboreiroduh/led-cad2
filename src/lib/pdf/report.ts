@@ -9,20 +9,22 @@ import { deriveBom } from "@/lib/cad/bom";
 import { getProfile } from "@/lib/cad/profiles";
 import { validateProject } from "@/lib/cad/validation";
 
-const A2 = { w: 1683.78, h: 1190.55 }; // pt, landscape
-const MM = 72 / 25.4;
-const RED = rgb(0.78, 0.12, 0.12);
-const INK = rgb(0.13, 0.16, 0.2);
-const GRAY = rgb(0.45, 0.49, 0.54);
-const LIGHT = rgb(0.75, 0.78, 0.82);
-const ORANGE = rgb(0.9, 0.45, 0.05);
-const NAVY = rgb(0.1, 0.15, 0.22);
+export const A2 = { w: 1683.78, h: 1190.55 }; // pt, landscape
+export const MM = 72 / 25.4;
+export const RED = rgb(0.78, 0.12, 0.12);
+export const INK = rgb(0.13, 0.16, 0.2);
+export const GRAY = rgb(0.45, 0.49, 0.54);
+export const LIGHT = rgb(0.75, 0.78, 0.82);
+export const ORANGE = rgb(0.9, 0.45, 0.05);
+export const NAVY = rgb(0.1, 0.15, 0.22);
+export const GREEN = rgb(0.09, 0.64, 0.34);
+export const PDF_RED = rgb(0.85, 0.15, 0.15);
 
 interface Pt {
   x: number;
   y: number;
 }
-interface Prim {
+export interface Prim {
   kind: "line" | "rect" | "circle";
   a?: Pt;
   b?: Pt;
@@ -35,15 +37,26 @@ interface Prim {
   fill?: boolean;
 }
 
-function sanitize(text: string): string {
+export type RGB = ReturnType<typeof rgb>;
+
+export function sanitize(text: string): string {
   return text
+    .replace(/\u2192/g, "->") // → não existe em WinAnsi (Helvetica padrão)
     .replace(/[^\x20-\x7E\u00A0-\u00FF]/g, "")
     .replace(/\u2018|\u2019/g, "'")
     .replace(/\u201C|\u201D/g, '"')
     .replace(/\u2013|\u2014/g, "-");
 }
 
-function project(doc: ProjectDocument, view: "front" | "side" | "top"): { prims: Prim[]; bbox: { min: Pt; max: Pt } } {
+/**
+ * Projeção ortográfica do documento (front/side/top) para primitivas PDF.
+ * `colorFor` opcional permite sobrescrever a cor por elemento (diff com status).
+ */
+export function project(
+  doc: ProjectDocument,
+  view: "front" | "side" | "top",
+  colorFor?: (el: ProjectDocument["elements"][number]) => RGB | undefined,
+): { prims: Prim[]; bbox: { min: Pt; max: Pt } } {
   const prims: Prim[] = [];
   const map = (x: number, y: number, z: number): Pt => {
     if (view === "front") return { x, y: z };
@@ -59,37 +72,38 @@ function project(doc: ProjectDocument, view: "front" | "side" | "top"): { prims:
   const bbox = { min: { x: Infinity, y: Infinity }, max: { x: -Infinity, y: -Infinity } };
 
   for (const el of doc.elements) {
+    const override = colorFor?.(el);
     if (el.type === "beam") {
       const prof = getProfile(el.profile);
       const t = prof ? prof.w : 40;
       const a = map(el.start.x, el.start.y, el.start.z);
       const b = map(el.end.x, el.end.y, el.end.z);
-      prims.push({ kind: "line", a, b, thickness: t, color: INK });
+      prims.push({ kind: "line", a, b, thickness: t, color: override ?? INK });
       grow(a, t / 2);
       grow(b, t / 2);
     } else if (el.type === "cable") {
       const a = map(el.start.x, el.start.y, el.start.z);
       const b = map(el.end.x, el.end.y, el.end.z);
-      prims.push({ kind: "line", a, b, thickness: el.diameter, color: GRAY });
+      prims.push({ kind: "line", a, b, thickness: el.diameter, color: override ?? GRAY });
       grow(a, el.diameter / 2);
       grow(b, el.diameter / 2);
     } else if (el.type === "plate") {
       const c = map(el.center.x, el.center.y, el.center.z);
       const sx = view === "side" ? el.size_y : el.size_x;
       const sy = view === "top" ? el.size_y : el.size_z;
-      prims.push({ kind: "rect", p: { x: c.x - sx / 2, y: c.y - sy / 2 }, w: sx, h: sy, thickness: 1, color: INK });
+      prims.push({ kind: "rect", p: { x: c.x - sx / 2, y: c.y - sy / 2 }, w: sx, h: sy, thickness: 1, color: override ?? INK });
       grow({ x: c.x - sx / 2, y: c.y - sy / 2 });
       grow({ x: c.x + sx / 2, y: c.y + sy / 2 });
     } else if (el.type === "panel") {
       const c = map(el.center.x, el.center.y, el.center.z);
       const sx = view === "side" ? el.size_y : el.size_x;
       const sy = view === "top" ? el.size_y : el.size_z;
-      prims.push({ kind: "rect", p: { x: c.x - sx / 2, y: c.y - sy / 2 }, w: sx, h: sy, thickness: 1.5, color: NAVY });
+      prims.push({ kind: "rect", p: { x: c.x - sx / 2, y: c.y - sy / 2 }, w: sx, h: sy, thickness: 1.5, color: override ?? NAVY });
       grow({ x: c.x - sx / 2, y: c.y - sy / 2 });
       grow({ x: c.x + sx / 2, y: c.y + sy / 2 });
     } else if (el.type === "bolt") {
       const c = map(el.center.x, el.center.y, el.center.z);
-      prims.push({ kind: "circle", p: c, r: el.diameter / 2, thickness: 0.8, color: GRAY });
+      prims.push({ kind: "circle", p: c, r: el.diameter / 2, thickness: 0.8, color: override ?? GRAY });
       grow(c, el.diameter);
     } else if (el.type === "surface") {
       let prev: Pt | null = null;
@@ -202,14 +216,14 @@ function isoProject(doc: ProjectDocument): { prims: Prim[]; bbox: { min: Pt; max
   return { prims, bbox };
 }
 
-interface ViewBox {
+export interface ViewBox {
   x: number;
   y: number;
   w: number;
   h: number;
 }
 
-function drawView(page: PDFPage, prims: Prim[], bbox: { min: Pt; max: Pt }, box: ViewBox, font: PDFFont, label: string, scaleNote: { value: number }) {
+export function drawView(page: PDFPage, prims: Prim[], bbox: { min: Pt; max: Pt }, box: ViewBox, font: PDFFont, label: string, scaleNote: { value: number }) {
   // frame
   page.drawRectangle({
     x: box.x,

@@ -157,11 +157,29 @@ function CopilotTab(props: CopilotDockProps) {
     <>
       <div ref={scrollRef} className="flex-1 overflow-y-auto cad-scroll p-3 space-y-3 min-h-0">
         {props.history.length === 0 && (
-          <div className="rounded-lg border border-dashed border-slate-300 p-4 text-xs text-slate-500 leading-relaxed">
-            <p className="font-semibold text-slate-600 mb-1">A IA escreve o documento inteiro.</p>
+          <div className="rounded-xl border border-dashed border-slate-300 bg-gradient-to-b from-slate-50 to-white p-4 text-xs text-slate-500 leading-relaxed">
+            <p className="font-semibold text-slate-600 mb-1 flex items-center gap-1.5">
+              <Sparkles className="h-3.5 w-3.5 text-orange-600" /> A IA escreve o documento inteiro.
+            </p>
             <p>Descreva a estrutura desejada. O sistema valida o JSON, calcula o diff e mostra o preview 3D antes de aplicar.</p>
-            <p className="mt-2 text-slate-400">Ex.: “remova os postes e use sustentação de parede” · “adicione cabo de fixação por coluna” · “transforme o painel em 4x2”.</p>
-            <p className="mt-2 flex items-start gap-1.5 text-slate-400">
+            <div className="mt-2.5 flex flex-col gap-1">
+              <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Experimente:</span>
+              {[
+                "remova os postes e use sustentação de parede",
+                "adicione cabo de fixação por coluna",
+                "adicione uma escada de acesso no poste direito",
+              ].map((ex) => (
+                <button
+                  key={ex}
+                  onClick={() => setInput(ex)}
+                  className="text-left truncate rounded-md border border-slate-200 bg-white px-2 py-1 text-slate-600 hover:border-orange-300 hover:bg-orange-50 hover:text-orange-800 transition-colors"
+                  title="Clique para preencher o campo de pedido"
+                >
+                  “{ex}”
+                </button>
+              ))}
+            </div>
+            <p className="mt-2.5 flex items-start gap-1.5 text-slate-400">
               <GraduationCap className="h-3.5 w-3.5 mt-0.5 shrink-0 text-violet-500" />
               Exemplos salvos com “salvar como exemplo” viram referência few-shot nas próximas transformações.
             </p>
@@ -171,9 +189,10 @@ function CopilotTab(props: CopilotDockProps) {
           <HistoryCard key={h.id} item={h} onSaveExample={(it) => saveExampleFromHistory(it, props.project)} />
         ))}
         {props.sending && (
-          <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-3">
+          <div className="relative flex items-center gap-2 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-3 overflow-hidden">
             <Loader2 className="h-4 w-4 animate-spin text-orange-600" />
             A IA está reescrevendo o documento completo… (pode levar até 1 min)
+            <div className="absolute bottom-0 left-0 h-0.5 w-full cad-shimmer-bar" aria-hidden />
           </div>
         )}
       </div>
@@ -325,8 +344,11 @@ function HistoryCard({ item, onSaveExample }: { item: HistoryItem; onSaveExample
           <span className="text-[10px] text-slate-400 flex items-center gap-1">
             {m.provider} · {m.model} · {((m.latency ?? 0) / 1000).toFixed(1)}s
             {!!m.fewShot && (
-              <span className="inline-flex items-center gap-0.5 rounded bg-violet-100 text-violet-700 border border-violet-200 px-1 font-semibold" title="usou exemplo few-shot salvo pelo operador">
-                <GraduationCap className="h-3 w-3" /> few-shot
+              <span
+                className="inline-flex items-center gap-0.5 rounded bg-violet-100 text-violet-700 border border-violet-200 px-1 font-semibold"
+                title={`usou exemplo few-shot salvo pelo operador${typeof m.fewShotScore === "number" ? ` · relevância ${(m.fewShotScore * 100).toFixed(0)}%` : ""}`}
+              >
+                <GraduationCap className="h-3 w-3" /> few-shot{typeof m.fewShotScore === "number" ? ` ${(m.fewShotScore * 100).toFixed(0)}%` : ""}
               </span>
             )}
           </span>

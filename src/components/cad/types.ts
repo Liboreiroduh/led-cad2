@@ -18,6 +18,8 @@ export interface HistoryItem {
     model?: string;
     latency?: number;
     fewShot?: string | null;
+    /** similaridade de Jaccard pedido↔exemplo (0–1) reportada pelo registry */
+    fewShotScore?: number | null;
     applied?: boolean;
     candidate?: ProjectDocument | null;
     baseRevision?: number;

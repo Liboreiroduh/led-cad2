@@ -59,7 +59,7 @@ export interface TransformResult {
   warnings: unknown[];
   base_revision: number;
   base_hash: string;
-  meta: { provider: string; model: string; latency_ms: number; attempts: number; few_shot_id?: string | null };
+  meta: { provider: string; model: string; latency_ms: number; attempts: number; few_shot_id?: string | null; few_shot_score?: number | null };
 }
 
 export interface PreviewResult {
@@ -165,6 +165,16 @@ export const api = {
     }
     const blob = await res.blob();
     triggerDownload(blob, filenameFromDisposition(res.headers.get("content-disposition")) ?? "led-cad.pdf");
+  },
+  /** relatório PDF de diferenças entre a revisão pedida e a atual */
+  async downloadDiffPdf(revision: number): Promise<void> {
+    const res = await fetch("/api/export/diff-pdf", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revision }) });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new ApiCallError(body?.error ?? { type: "http_error", message: `HTTP ${res.status}` }, res.status);
+    }
+    const blob = await res.blob();
+    triggerDownload(blob, filenameFromDisposition(res.headers.get("content-disposition")) ?? `led-cad-diff-rev${revision}.pdf`);
   },
   async downloadBomCsv(project?: unknown): Promise<void> {
     const res = await fetch("/api/export/bom", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ format: "csv", project }) });

@@ -13,7 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   FilePlus2, Upload, Undo2, FileSpreadsheet, FileDown, PlugZap, Loader2, X, Lock, RefreshCw,
-  Camera, Keyboard, Layers3, Ruler, Crosshair, GitCompare, MoveHorizontal, Weight, ChevronDown, ChevronUp,
+  Camera, Keyboard, Layers3, Ruler, Crosshair, GitCompare, MoveHorizontal, Weight, ChevronDown, ChevronUp, Columns2,
 } from "lucide-react";
 import { toast } from "sonner";
 import Viewer3D from "@/components/cad/Viewer3D";
@@ -34,6 +34,8 @@ const Viewer3DNoSSR = dynamic(() => import("@/components/cad/Viewer3D"), {
     </div>
   ),
 });
+
+const CompareSplitNoSSR = dynamic(() => import("@/components/cad/CompareSplit"), { ssr: false });
 
 interface CandidateState {
   project: ProjectDocument;
@@ -84,6 +86,7 @@ export default function Home() {
   const [measureResult, setMeasureResult] = useState<{ distance: number } | null>(null);
   const [comparingRev, setComparingRev] = useState<number | null>(null);
   const [restoreInfo, setRestoreInfo] = useState<number | null>(null);
+  const [compareMode, setCompareMode] = useState<"ghost" | "split">("ghost");
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const [dockWidth, setDockWidth] = useState(DOCK_DEFAULT);
   const dockDragRef = useRef<{ startX: number; startW: number } | null>(null);
@@ -157,7 +160,14 @@ export default function Home() {
       .catch(() => setProviderLabel("mock · mock-transformer-v1"));
   }, [refresh]);
 
-  // Ctrl+Z → undo atômico; 1–7 → vistas; Esc → desselecionar
+  // ref síncrono do restoreInfo para uso no handler de teclado (evita stale closure)
+  const restoreInfoRef = useRef<number | null>(null);
+  useEffect(() => {
+    restoreInfoRef.current = restoreInfo;
+    if (restoreInfo === null) setCompareMode("ghost");
+  }, [restoreInfo]);
+
+  // Ctrl+Z → undo atômico; 1–7 → vistas; Esc → desselecionar; B → alterna ghost/A/B
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
@@ -169,10 +179,16 @@ export default function Home() {
         setSelectedId(null);
         setMeasureMode(false);
         setMeasureResult(null);
+        // Esc na comparação A/B volta para o modo ghost (2º Esc limpa o preview)
+        setCompareMode((m) => (m === "split" && restoreInfoRef.current !== null ? "ghost" : m));
         return;
       }
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (e.key.toLowerCase() === "b" && restoreInfoRef.current !== null) {
+        setCompareMode((m) => (m === "ghost" ? "split" : "ghost"));
+        return;
+      }
       const viewKeys = ["1", "2", "3", "4", "5", "6", "7"];
       const idx = viewKeys.indexOf(e.key);
       if (idx >= 0) setViewMode(VIEWS[idx]);
@@ -235,6 +251,7 @@ export default function Home() {
               model: r.meta.model,
               latency: r.meta.latency_ms,
               fewShot: r.meta.few_shot_id ?? null,
+              fewShotScore: r.meta.few_shot_score ?? null,
               candidate: r.candidate_project,
             },
           });
@@ -251,6 +268,7 @@ export default function Home() {
               model: r.meta.model,
               latency: r.meta.latency_ms,
               fewShot: r.meta.few_shot_id ?? null,
+              fewShotScore: r.meta.few_shot_score ?? null,
             },
           });
         }
@@ -486,6 +504,8 @@ export default function Home() {
 
   const fitKey = `${projectState?.revision ?? 0}:${projectState?.hash?.slice(0, 8) ?? ""}:${candidate?.hash.slice(0, 8) ?? "none"}`;
   const project = projectState?.project;
+  /** comparação A/B ativa (dois viewports) — só no fluxo de restauração de revisão */
+  const splitActive = restoreInfo !== null && compareMode === "split" && candidate !== null;
 
   return (
     <TooltipProvider>
@@ -510,9 +530,21 @@ export default function Home() {
               <Badge variant="outline" className="text-slate-300 border-slate-500">
                 rev {projectState!.revision}
               </Badge>
-              <Badge variant="outline" className="text-slate-400 border-slate-600 font-mono text-[10px]">
-                {projectState!.hash.slice(0, 8)}
-              </Badge>
+              <button
+                onClick={() => {
+                  const h = projectState!.hash;
+                  if (navigator.clipboard?.writeText) {
+                    navigator.clipboard.writeText(h).then(() => toast.success(`Hash ${h.slice(0, 8)} copiado`)).catch(() => toast.error("Não foi possível copiar"));
+                  }
+                }}
+                title={`Copiar hash completo (${projectState!.hash})`}
+                aria-label={`Copiar hash de revisão ${projectState!.hash}`}
+                className="outline-none"
+              >
+                <Badge variant="outline" className="text-slate-400 border-slate-600 font-mono text-[10px] hover:text-white hover:border-slate-400 transition-colors cursor-pointer">
+                  {projectState!.hash.slice(0, 8)}
+                </Badge>
+              </button>
               <Badge variant="outline" className="text-slate-400 border-slate-600">
                 {project.elements.length} el.
               </Badge>
@@ -550,7 +582,8 @@ export default function Home() {
           {/* VIEWPORT */}
           <section className="relative flex-1 min-h-[45vh] lg:min-h-0 bg-slate-100" aria-label="Viewport 3D">
             {project ? (
-              <Viewer3DNoSSR
+              <div className={`absolute inset-0 ${splitActive ? "invisible" : ""}`} aria-hidden={splitActive}>
+                <Viewer3DNoSSR
                 project={project}
                 candidate={candidate?.project ?? null}
                 statuses={statuses}
@@ -565,14 +598,30 @@ export default function Home() {
                 showDimensions={showDimensions}
                 measureMode={measureMode}
                 onMeasureResult={setMeasureResult}
-              />
+                />
+              </div>
             ) : (
               <div className="absolute inset-0 grid place-items-center text-slate-400">
                 <Loader2 className="h-8 w-8 animate-spin" />
               </div>
             )}
 
-            {/* vistas — linha única com scroll em telas pequenas + atalhos */}
+            {/* COMPARAÇÃO A/B — dois viewports sincronizados (restauração de revisão) */}
+            {splitActive && project && candidate && (
+              <CompareSplitNoSSR
+                docA={project}
+                revA={projectState!.revision}
+                docB={candidate.project}
+                revB={restoreInfo!}
+                statusesA={statuses}
+                statusesB={candidateStatuses}
+                diffCounts={candidate.diff.counts}
+                onClose={() => setCompareMode("ghost")}
+              />
+            )}
+
+            {/* vistas — linha única com scroll em telas pequenas + atalhos (ocultas na comparação A/B) */}
+            {!splitActive && (
             <div className="absolute top-2.5 left-1/2 -translate-x-1/2 max-w-[95%] flex items-center gap-1" role="toolbar" aria-label="Vistas da câmera">
               <div className="relative flex items-center min-w-0 max-w-full">
                 <div className="flex items-center gap-0.5 bg-white/90 backdrop-blur rounded-full px-1.5 py-1 shadow-md border border-slate-200 overflow-x-auto cad-scroll max-w-full">
@@ -641,10 +690,11 @@ export default function Home() {
                 <Keyboard className="h-4 w-4" />
               </button>
             </div>
+            )}
 
             {/* popover de atalhos */}
             <AnimatePresence>
-              {shortcutsOpen && (
+              {shortcutsOpen && !splitActive && (
                 <motion.div
                   initial={{ opacity: 0, y: -6, scale: 0.97 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -677,6 +727,10 @@ export default function Home() {
                       <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">M</kbd>
                     </li>
                     <li className="flex items-center justify-between">
+                      <span>Alternar comparação A/B</span>
+                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">B</kbd>
+                    </li>
+                    <li className="flex items-center justify-between">
                       <span>Desselecionar / sair do modo</span>
                       <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Esc</kbd>
                     </li>
@@ -690,7 +744,7 @@ export default function Home() {
             </AnimatePresence>
 
             {/* badge do modo medição */}
-            {measureMode && (
+            {measureMode && !splitActive && (
               <motion.div
                 initial={{ opacity: 0, y: -6 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -711,7 +765,7 @@ export default function Home() {
             )}
 
             {/* badge grupo isolado */}
-            {isolatedGroup && (
+            {isolatedGroup && !splitActive && (
               <motion.button
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
@@ -725,7 +779,7 @@ export default function Home() {
 
             {/* info do elemento selecionado */}
             <AnimatePresence>
-              {selectedElement && (
+              {selectedElement && !splitActive && (
                 <motion.div
                   initial={{ opacity: 0, x: -12 }}
                   animate={{ opacity: 1, x: 0 }}
@@ -768,8 +822,8 @@ export default function Home() {
               )}
             </AnimatePresence>
 
-            {/* legenda de diff → inspector detalhado ao clicar */}
-            {candidate && (
+            {/* legenda de diff → inspector detalhado ao clicar (só no modo ghost) */}
+            {candidate && !splitActive && (
               <DiffInspector
                 diff={candidate.diff}
                 onPick={(id) => focusElement(id)}
@@ -784,7 +838,7 @@ export default function Home() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 24 }}
                   transition={{ type: "spring", stiffness: 320, damping: 28 }}
-                  className="absolute bottom-3 left-1/2 -translate-x-1/2 w-[min(680px,92%)] bg-[#1b2836]/95 backdrop-blur text-white rounded-xl shadow-2xl border border-orange-500/60 px-4 py-2.5 flex flex-col sm:flex-row items-center gap-2"
+                  className="absolute bottom-3 left-1/2 -translate-x-1/2 w-[min(680px,92%)] bg-[#1b2836]/95 backdrop-blur text-white rounded-xl shadow-2xl border border-orange-500/60 px-4 py-2.5 flex flex-col sm:flex-row items-center gap-2 z-20"
                   role="alertdialog"
                   aria-label="Preview de alterações propostas"
                 >
@@ -801,7 +855,38 @@ export default function Home() {
                       {candidate.diff.panel_changed ? " · painel alterado" : ""}
                     </span>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 items-center">
+                    {/* alternador de modo de comparação (só no fluxo de restauração) */}
+                    {restoreInfo !== null && (
+                      <div
+                        className="flex rounded-lg overflow-hidden border border-slate-500/70 shrink-0"
+                        role="radiogroup"
+                        aria-label="Modo de comparação visual"
+                      >
+                        <button
+                          role="radio"
+                          aria-checked={compareMode === "ghost"}
+                          onClick={() => setCompareMode("ghost")}
+                          title="Diff por transparência no viewport atual (B alterna)"
+                          className={`px-2.5 py-1.5 text-[10px] font-bold tracking-wide transition-colors ${
+                            compareMode === "ghost" ? "bg-slate-200 text-slate-900" : "text-slate-300 hover:bg-slate-700"
+                          }`}
+                        >
+                          GHOST
+                        </button>
+                        <button
+                          role="radio"
+                          aria-checked={compareMode === "split"}
+                          onClick={() => setCompareMode("split")}
+                          title="Dois viewports lado a lado com órbita sincronizada (B alterna)"
+                          className={`px-2.5 py-1.5 text-[10px] font-bold tracking-wide transition-colors flex items-center gap-1 ${
+                            compareMode === "split" ? "bg-orange-600 text-white" : "text-slate-300 hover:bg-slate-700"
+                          }`}
+                        >
+                          <Columns2 className="h-3 w-3" /> A/B
+                        </button>
+                      </div>
+                    )}
                     <Button size="sm" onClick={() => void applyCandidate()} className={restoreInfo !== null ? "bg-amber-500 hover:bg-amber-600 text-white font-bold px-5 shadow-lg shadow-amber-900/40" : "bg-green-600 hover:bg-green-700 text-white font-bold px-5 shadow-lg shadow-green-900/40"}>
                       {restoreInfo !== null ? `RESTAURAR REV ${restoreInfo}` : "APLICAR"}
                     </Button>
@@ -910,6 +995,7 @@ export default function Home() {
           <span className="hidden sm:inline truncate">JSON do projeto é a fonte de verdade · canvas é visualização · PDF/BOM derivados</span>
           <span className="ml-auto flex items-center gap-2 shrink-0">
             {candidate && <span className="text-orange-400 font-semibold">PREVIEW ATIVO</span>}
+            {splitActive && <span className="text-amber-300 font-semibold hidden md:inline cad-pulse-soft">A/B rev {restoreInfo}</span>}
             {isolatedGroup && <span className="text-amber-400 hidden md:inline">isolando {isolatedGroup}</span>}
             <span className="hidden lg:inline">
               {project?.elements.length ?? 0} el. · {new Set((project?.elements ?? []).map((e) => e.group)).size} grupos

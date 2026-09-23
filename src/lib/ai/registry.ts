@@ -42,19 +42,56 @@ export interface TransformMeta {
   attempts: number;
   /** id do exemplo few-shot usado (§25) — null quando nenhum aplicável */
   few_shot_id: string | null;
+  /** similaridade de Jaccard entre pedido e exemplo escolhido (0–1) */
+  few_shot_score: number | null;
 }
 
 /**
- * Escolhe o exemplo few-shot mais recente que caiba no orçamento de tokens.
+ * Escolhe o exemplo few-shot mais RELEVANTE que caiba no orçamento de tokens.
+ * Relevância = similaridade de Jaccard entre os tokens do pedido do usuário e do
+ * exemplo (stopwords PT/EN removidas); empate → exemplo mais recente.
  * Guard de economia (§16/§34): exemplo completo (antes+depois) ≤ ~220KB combinados
  * e documento "antes" com até 120 elementos — acima disso o custo supera o ganho.
  */
 const FEW_SHOT_MAX_ELEMENTS = 120;
 const FEW_SHOT_MAX_BYTES = 220_000;
 
-function pickFewShot(): { id: string; request: string; before: string; after: string } | null {
+/** stopwords PT + EN — não contam para similaridade */
+const FEW_SHOT_STOPWORDS = new Set(
+  ("a o os as um uma uns umas de do da dos das em no na nos nas por para com sem sob sobre entre e ou mas que qual quais como quando onde ao à aos às " +
+    "the an of on in for to with without under over between and or but that which how when where at from by is are be been add remove change make set " +
+    "adicione remova mude troque coloque ponha coloque mude faca faça criar crie incluir inclua aumentar diminua")
+    .split(" "),
+);
+
+/** tokeniza minúsculo, remove acentos simples e stopwords — p/ similaridade */
+function requestTokens(text: string): Set<string> {
+  const norm = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  const tokens = norm.match(/[a-z0-9_]{2,}/g) ?? [];
+  const out = new Set<string>();
+  for (const t of tokens) {
+    if (FEW_SHOT_STOPWORDS.has(t)) continue;
+    out.add(t.replace(/s$/, "")); // stemming grosseiro de plural
+  }
+  return out;
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+function pickFewShot(userRequest: string): { id: string; request: string; before: string; after: string; score: number } | null {
   try {
     const examples = getStore().listExamples();
+    const query = requestTokens(userRequest);
+    let best: { id: string; request: string; before: string; after: string; score: number } | null = null;
+    // listExamples retorna mais recente primeiro; iterar na ordem mantém desempate = mais recente
     for (const ex of examples) {
       if (ex.before_elements <= 0 || ex.after_elements <= 0) continue;
       if (ex.before_elements > FEW_SHOT_MAX_ELEMENTS) continue;
@@ -62,8 +99,10 @@ function pickFewShot(): { id: string; request: string; before: string; after: st
       const before = JSON.stringify(ex.before);
       const after = JSON.stringify(ex.after);
       if (!before || !after || before.length + after.length > FEW_SHOT_MAX_BYTES) continue;
-      return { id: ex.id, request: ex.request, before, after };
+      const score = jaccard(query, requestTokens(ex.request));
+      if (!best || score > best.score) best = { id: ex.id, request: ex.request, before, after, score };
     }
+    return best;
   } catch {
     // sem exemplos — segue sem few-shot
   }
@@ -176,7 +215,7 @@ export async function transformProject(input: {
   let attempts = 0;
   let lastError: Error & { details?: string; isEnvelope?: boolean; isSchema?: boolean } | null = null;
   const totalStart = Date.now();
-  const fewShot = pickFewShot();
+  const fewShot = pickFewShot(input.userRequest);
 
   while (attempts < 2) {
     attempts++;
@@ -211,7 +250,7 @@ export async function transformProject(input: {
         candidate,
         candidate_hash,
         validation_warnings: warnings,
-        meta: { provider: providerId, model: result.model, latency_ms: Date.now() - totalStart, attempts, few_shot_id: fewShot?.id ?? null },
+        meta: { provider: providerId, model: result.model, latency_ms: Date.now() - totalStart, attempts, few_shot_id: fewShot?.id ?? null, few_shot_score: fewShot ? Number(fewShot.score.toFixed(3)) : null },
       };
     } catch (e) {
       const err = e as Error & { details?: string; isEnvelope?: boolean; isSchema?: boolean };

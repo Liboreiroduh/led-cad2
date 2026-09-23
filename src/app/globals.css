@@ -137,3 +137,32 @@ textarea.cad-scroll::-webkit-scrollbar {
 .cad-scroll::-webkit-scrollbar-thumb:hover {
   background: rgba(100, 116, 139, 0.7);
 }
+
+/* shimmer — barra de progresso do envio para a IA */
+@keyframes cad-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+.cad-shimmer-bar {
+  background: linear-gradient(90deg, transparent 0%, #ea580c 25%, #f59e0b 50%, #ea580c 75%, transparent 100%);
+  background-size: 200% 100%;
+  animation: cad-shimmer 1.4s linear infinite;
+}
+
+/* pulso suave no badge de comparação A/B */
+@keyframes cad-pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+.cad-pulse-soft {
+  animation: cad-pulse-soft 1.6s ease-in-out infinite;
+}

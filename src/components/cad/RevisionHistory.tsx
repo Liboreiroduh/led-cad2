@@ -8,9 +8,10 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   History, RefreshCw, Loader2, GitCompare, Sparkles, Braces, Upload, FileJson,
-  Undo2, RotateCcw, FilePlus2, Circle, Monitor,
+  Undo2, RotateCcw, FilePlus2, Circle, Monitor, FileText,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
 import { api, ApiCallError, type RevisionListItem } from "@/lib/cad/client-api";
 
 const SOURCE_META: Record<
@@ -49,6 +50,20 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState<number | null>(null);
+  const [pdfBusy, setPdfBusy] = useState<number | null>(null);
+
+  const downloadDiffPdf = async (rev: number) => {
+    setPdfBusy(rev);
+    try {
+      await api.downloadDiffPdf(rev);
+      toast.success(`Relatório de diferenças rev ${rev} gerado`);
+    } catch (e) {
+      const err = e as ApiCallError;
+      toast.error(err.payload?.message ?? err.message);
+    } finally {
+      setPdfBusy(null);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -173,6 +188,17 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
                       >
                         {restoring === r.revision ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
                         RESTAURAR
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 px-2 text-[10px] font-semibold border-slate-300 text-slate-600 hover:border-emerald-400 hover:text-emerald-700"
+                        onClick={() => void downloadDiffPdf(r.revision)}
+                        disabled={pdfBusy !== null || comparingRev !== null}
+                        title="Baixar relatório PDF de diferenças entre esta revisão e a atual"
+                      >
+                        {pdfBusy === r.revision ? <Loader2 className="h-3 w-3 animate-spin" /> : <FileText className="h-3 w-3" />}
+                        PDF
                       </Button>
                     </div>
                   )}
