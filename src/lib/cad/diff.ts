@@ -1,8 +1,9 @@
 /**
  * DIFF AUTOMÁTICO — calculado pelo sistema, NUNCA pela IA.
- * Compara elementos por id estável + mudanças de panel/info.
+ * Compara elementos por id estável + mudanças de extensions.panel/info.
  */
 import type { ProjectDiff, ProjectDocument } from "./schema";
+import { panelDimsOf } from "./geometry";
 import { canonicalJson } from "./hashing";
 
 export function diffProjects(oldDoc: ProjectDocument, newDoc: ProjectDocument): ProjectDiff {
@@ -28,6 +29,9 @@ export function diffProjects(oldDoc: ProjectDocument, newDoc: ProjectDocument): 
   removed.sort();
   modified.sort();
 
+  const oldPanel = panelDimsOf(oldDoc);
+  const newPanel = panelDimsOf(newDoc);
+
   return {
     added,
     removed,
@@ -38,7 +42,7 @@ export function diffProjects(oldDoc: ProjectDocument, newDoc: ProjectDocument): 
       modified: modified.length,
       total: added.length + removed.length + modified.length,
     },
-    panel_changed: canonicalJson(oldDoc.panel) !== canonicalJson(newDoc.panel),
+    panel_changed: canonicalJson(oldPanel) !== canonicalJson(newPanel),
     info_changed: canonicalJson(oldDoc.project) !== canonicalJson(newDoc.project),
   };
 }
@@ -49,6 +53,5 @@ export function describeDiff(diff: ProjectDiff): string {
   if (diff.counts.modified) parts.push(`${diff.counts.modified} editadas`);
   if (diff.counts.removed) parts.push(`${diff.counts.removed} removidas`);
   const base = parts.length ? parts.join(" · ") : "nenhuma alteração de elementos";
-  if (diff.panel_changed) base.concat("");
   return `${diff.counts.total} alterações propostas — ${base}${diff.panel_changed ? " · painel alterado" : ""}`;
 }

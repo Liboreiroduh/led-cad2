@@ -1,46 +1,35 @@
-/** Fábrica de projeto em branco + helpers de ID. */
-import type { ProjectDocument } from "./schema";
+/** Fábrica de projeto em branco (v2 geométrico) + helpers de ID. */
+import type { ProjectDocument, GeometryElement } from "./schema";
 import { newProjectId } from "./hashing";
 
 export function blankProject(name = "Novo Painel LED"): ProjectDocument {
   return {
-    schema_version: 1,
+    schema_version: 2,
     units: "mm",
     project: {
       id: newProjectId(),
       name,
       description: "Projeto em branco — descreva a estrutura desejada no Copiloto IA.",
     },
-    panel: {
-      width: 1920,
-      height: 960,
-      depth: 650,
-      ground_clearance: 3000,
-    },
-    installation: {
-      type: "post",
-      environment: "outdoor",
-    },
     elements: [
       {
         id: "PANEL-LED",
-        type: "panel",
-        role: "panel",
-        profile: "",
-        group: "PAINEL",
-        center: { x: 0, y: 0, z: 3000 + 960 / 2 },
-        size_x: 1920,
-        size_y: 120,
-        size_z: 960,
-        label: "PAINEL LED 1920x960",
+        geometry: {
+          type: "box",
+          center: { x: 0, y: 0, z: 3000 + 960 / 2 },
+          size: [1920, 120, 960],
+        },
+        metadata: {
+          name: "PAINEL LED 1920x960",
+          label: "PAINEL LED 1920x960",
+          group: "PAINEL",
+          role: "panel",
+          led: true,
+        },
       },
     ],
     assumptions: [],
-    metadata: {
-      source: "manual",
-      preset_id: null,
-      reviews: [],
-    },
+    metadata: { source: "manual" },
   };
 }
 
@@ -55,8 +44,17 @@ export function nextId(doc: ProjectDocument, prefix: string): string {
   return `${prefix}-${String(max + 1).padStart(2, "0")}`;
 }
 
+/** Helper para criar elemento geométrico com metadata mínima. */
+export function mkElement(
+  id: string,
+  geometry: GeometryElement["geometry"],
+  metadata: GeometryElement["metadata"] = {},
+): GeometryElement {
+  return { id, geometry, metadata };
+}
+
 export function elementSummary(doc: ProjectDocument): string {
   const byType = new Map<string, number>();
-  for (const el of doc.elements) byType.set(el.type, (byType.get(el.type) ?? 0) + 1);
+  for (const el of doc.elements) byType.set(el.geometry.type, (byType.get(el.geometry.type) ?? 0) + 1);
   return [...byType.entries()].map(([t, n]) => `${n} ${t}`).join(", ");
 }
