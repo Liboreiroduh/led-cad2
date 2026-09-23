@@ -5,6 +5,19 @@
  * IMPORTANTE: bays estruturais ≠ grade de gabinetes.
  */
 import type { ProjectDocument } from "./schema";
+import { legacyProjectToGeometry } from "./legacy-adapter";
+
+/** Formato legado v1 — usado APENAS pelo gerador interno; a saída pública é sempre v2. */
+interface LegacyProjectDoc {
+  schema_version: 1;
+  units: "mm";
+  project: { id: string; name: string; description: string };
+  panel: { width: number; height: number; depth: number; ground_clearance: number };
+  installation: { type: string; environment: string };
+  elements: Array<Record<string, unknown>>;
+  assumptions: string[];
+  metadata: { source: string; preset_id: string | null; reviews: never[] };
+}
 
 export interface PresetRef {
   id: string;
@@ -99,7 +112,7 @@ export const REF_SPECS: RefSpec[] = [
 
 function beam(
   id: string,
-  role: ProjectDocument["elements"][number] extends infer E ? string : string,
+  role: string,
   profile: string,
   group: string,
   start: { x: number; y: number; z: number },
@@ -118,8 +131,8 @@ function beam(
   };
 }
 
-/** Constrói a estrutura completa de referência a partir da spec. */
-export function buildReferenceProject(spec: RefSpec): ProjectDocument {
+/** Constrói a estrutura completa de referência a partir da spec (formato legado; convertido na saída). */
+export function buildReferenceProject(spec: RefSpec): LegacyProjectDoc {
   const { panelW: W, panelH: H, pd, cage, railSpacing, frameProfile, secondaryProfile, postProfile } = spec;
   const halfW = W / 2;
   const postInset = 60;
@@ -128,7 +141,7 @@ export function buildReferenceProject(spec: RefSpec): ProjectDocument {
   const yFront = 0;
   const yBack = -cage;
   const topZ = pd + H;
-  const elements: ProjectDocument["elements"] = [];
+  const elements: LegacyProjectDoc["elements"] = [];
 
   // Painel LED (referência visual, não aço)
   elements.push({
@@ -277,10 +290,13 @@ export function buildReferenceProject(spec: RefSpec): ProjectDocument {
   };
 }
 
+/** Gerador interno continua produzindo o formato clássico; a saída pública é SEMPRE v2. */
 let _cache: Map<string, ProjectDocument> | null = null;
 export function referencePresets(): Map<string, ProjectDocument> {
   if (!_cache) {
-    _cache = new Map(REF_SPECS.map((s) => [s.id, buildReferenceProject(s)]));
+    _cache = new Map(
+      REF_SPECS.map((s) => [s.id, legacyProjectToGeometry(buildReferenceProject(s))]),
+    );
   }
   return _cache;
 }

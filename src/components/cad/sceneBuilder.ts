@@ -1,11 +1,12 @@
 /**
- * Scene builder — converte ProjectDocument em geometria Three.js.
+ * Scene builder v2 — converte GeometryDocument em geometria Three.js.
+ * O renderer decide por element.geometry.type (NUNCA por role/profile/material).
  * Mapeamento: model(X=largura, Y=profundidade, Z=altura) → three(x, y=altura, z=profundidade).
  * Estados de diff: added=verde, modified=laranja, removed=vermelho (ghost), unchanged=cinza.
  */
 import * as THREE from "three";
-import { getProfile } from "@/lib/cad/profiles";
-import type { ProjectDocument } from "@/lib/cad/schema";
+import type { ProjectDocument, GeometryElement, Geometry } from "@/lib/cad/schema";
+import { elLed } from "@/lib/cad/schema";
 
 export type DiffStatus = "added" | "removed" | "modified" | "unchanged";
 export type StatusMap = Record<string, DiffStatus>;
@@ -85,6 +86,42 @@ export interface BuiltScene {
   bbox: THREE.Box3;
 }
 
+/* ============================ CORES BASE POR PRIMITIVO ============================ */
+
+const BASE_COLORS: Record<string, number> = {
+  line: 0x6b7280,
+  beam: STEEL,
+  box: 0x5d6673,
+  cylinder: 0x8b95a1,
+  circle: 0x6b7280,
+  arc: 0x6b7280,
+  polyline: 0x6b7280,
+  polygon: 0x94a3b8,
+  surface: 0x94a3b8,
+  mesh: 0x94a3b8,
+  text: 0x475569,
+  dimension: 0x475569,
+};
+
+/** Cor do elemento: metadata.color (#rrggbb) → paleta por tipo → status de diff. */
+function baseColor(el: GeometryElement, status?: DiffStatus): number {
+  if (status && status !== "unchanged") return STATUS_COLORS[status];
+  const c = el.metadata?.["color"];
+  if (typeof c === "string") {
+    const m = c.match(/^#([0-9a-f]{6})$/i);
+    if (m) return parseInt(m[1], 16);
+  }
+  if (elLed(el)) return PANEL;
+  return BASE_COLORS[el.geometry.type] ?? STEEL;
+}
+
+/** Plano (XY|XZ|YZ do modelo) → função que mapeia um ponto 2D do plano para o espaço modelo. */
+function planeBasis(plane: string): ((u: number, v: number) => { x: number; y: number; z: number }) {
+  if (plane === "XY") return (u, v) => ({ x: u, y: v, z: 0 });
+  if (plane === "YZ") return (u, v) => ({ x: 0, y: u, z: v });
+  return (u, v) => ({ x: u, y: 0, z: v }); // XZ (vertical, padrão para círculos "de pé")
+}
+
 export function buildProjectGroup(
   doc: ProjectDocument,
   statuses?: StatusMap,
@@ -111,122 +148,211 @@ export function buildProjectGroup(
     });
 
   const bbox = new THREE.Box3();
+  const addMesh = (el: GeometryElement, mesh: THREE.Object3D) => {
+    const status = statuses?.[el.id];
+    register(el.id, mesh);
+    group.add(mesh);
+    bbox.expandByObject(mesh);
+    void status;
+  };
 
   for (const el of doc.elements) {
     const status = statuses?.[el.id];
     if (status === "unchanged" && opts.skipUnchanged) continue;
+    const color = baseColor(el, status);
+    const g = el.geometry;
 
-    if (el.type === "beam") {
-      const prof = getProfile(el.profile);
-      const w = prof ? prof.w : 50;
-      const isRound = prof?.kind === "round";
-      const a = v3(el.start);
-      const b = v3(el.end);
-      const color = status && status !== "unchanged" ? STATUS_COLORS[status] : STEEL;
-      const mat = mkSteel(color, status);
-      let mesh: THREE.Mesh;
-      if (isRound) {
-        mesh = orientedMesh(
-          a,
-          b,
-          (len) => new THREE.CylinderGeometry(w / 2, w / 2, len, 20),
+    switch (g.type) {
+      case "beam": {
+        const w = g.section.width;
+        const h = g.section.height;
+        const a = v3(g.start);
+        const b = v3(g.end);
+        const mesh =
+          g.section.type === "round"
+            ? orientedMesh(a, b, (len) => new THREE.CylinderGeometry(g.section.diameter / 2, g.section.diameter / 2, len, 20), new THREE.Vector3(0, 1, 0))
+            : orientedMesh(a, b, (len) => new THREE.BoxGeometry(w, h, len), new THREE.Vector3(0, 0, 1));
+        mesh.material = mkSteel(color, status);
+        addMesh(el, mesh);
+        break;
+      }
+      case "cylinder": {
+        const mesh = orientedMesh(
+          v3(g.start),
+          v3(g.end),
+          (len) => new THREE.CylinderGeometry(g.diameter / 2, g.diameter / 2, len, 20),
           new THREE.Vector3(0, 1, 0),
         );
-      } else {
-        mesh = orientedMesh(
-          a,
-          b,
-          (len) => new THREE.BoxGeometry(w, w, len),
-          new THREE.Vector3(0, 0, 1),
+        mesh.material = mkSteel(color, status);
+        addMesh(el, mesh);
+        break;
+      }
+      case "line": {
+        const t = Math.max(g.thickness ?? 8, 2);
+        const mesh = orientedMesh(
+          v3(g.start),
+          v3(g.end),
+          (len) => new THREE.CylinderGeometry(t / 2, t / 2, len, 8),
+          new THREE.Vector3(0, 1, 0),
         );
+        mesh.material = mkSteel(color, status);
+        addMesh(el, mesh);
+        break;
       }
-      mesh.material = mat;
-      register(el.id, mesh);
-      group.add(mesh);
-      bbox.expandByObject(mesh);
-    } else if (el.type === "plate") {
-      const color = status && status !== "unchanged" ? STATUS_COLORS[status] : 0x5d6673;
-      const mesh = new THREE.Mesh(
-        new THREE.BoxGeometry(el.size_x, el.size_z, el.size_y),
-        mkSteel(color, status),
-      );
-      mesh.position.copy(v3(el.center));
-      register(el.id, mesh);
-      group.add(mesh);
-      bbox.expandByObject(mesh);
-    } else if (el.type === "bolt") {
-      const color = status && status !== "unchanged" ? STATUS_COLORS[status] : 0x475569;
-      const mesh = new THREE.Mesh(
-        new THREE.CylinderGeometry(el.diameter / 2, el.diameter / 2, el.length, 12),
-        mkSteel(color, status),
-      );
-      mesh.position.copy(v3(el.center));
-      register(el.id, mesh);
-      group.add(mesh);
-      bbox.expandByObject(mesh);
-    } else if (el.type === "panel") {
-      const statusColor = status && status !== "unchanged" ? STATUS_COLORS[status] : PANEL;
-      const baseMat = new THREE.MeshStandardMaterial({
-        color: statusColor,
-        metalness: 0.2,
-        roughness: 0.35,
-        transparent: true,
-        opacity: status === "removed" || status === "added" ? 0.5 : 0.72,
-        emissive: status && status !== "unchanged" ? STATUS_COLORS[status] : 0xf97316,
-        emissiveIntensity: status && status !== "unchanged" ? 0.25 : 0.08,
-        side: THREE.DoubleSide,
-      });
-      // face frontal (three +Z) recebe a textura de módulos LED
-      const frontMat = baseMat.clone();
-      frontMat.map = panelTexture();
-      frontMat.emissiveMap = panelTexture();
-      frontMat.emissive = new THREE.Color(0xffffff);
-      frontMat.emissiveIntensity = status && status !== "unchanged" ? 0.35 : 0.5;
-      const geo = new THREE.BoxGeometry(el.size_x, el.size_z, el.size_y);
-      const mesh = new THREE.Mesh(geo, [
-        baseMat,
-        baseMat,
-        baseMat,
-        baseMat,
-        frontMat,
-        baseMat,
-      ]);
-      mesh.position.copy(v3(el.center));
-      const edges = new THREE.LineSegments(
-        new THREE.EdgesGeometry(geo),
-        new THREE.LineBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.55 }),
-      );
-      mesh.add(edges);
-      register(el.id, mesh);
-      register(el.id, edges);
-      group.add(mesh);
-      bbox.expandByObject(mesh);
-    } else if (el.type === "cable") {
-      const color = status && status !== "unchanged" ? STATUS_COLORS[status] : 0x6b7280;
-      const mesh = orientedMesh(
-        v3(el.start),
-        v3(el.end),
-        (len) => new THREE.CylinderGeometry(Math.max(el.diameter / 2, 2), Math.max(el.diameter / 2, 2), len, 10),
-        new THREE.Vector3(0, 1, 0),
-      );
-      mesh.material = mkSteel(color, status);
-      register(el.id, mesh);
-      group.add(mesh);
-      bbox.expandByObject(mesh);
-    } else if (el.type === "surface") {
-      const geometry = new THREE.BufferGeometry();
-      const pts = el.points.map((p) => v3(p));
-      const vertices: number[] = [];
-      for (let i = 1; i < pts.length - 1; i++) {
-        vertices.push(pts[0].x, pts[0].y, pts[0].z, pts[i].x, pts[i].y, pts[i].z, pts[i + 1].x, pts[i + 1].y, pts[i + 1].z);
+      case "polyline": {
+        const t = Math.max(g.thickness ?? 8, 2);
+        const pts = g.points.map((p) => v3(p));
+        if (g.closed && pts.length > 2) pts.push(pts[0].clone());
+        const polylineGroup = new THREE.Group();
+        for (let i = 1; i < pts.length; i++) {
+          const seg = orientedMesh(pts[i - 1], pts[i], (len) => new THREE.CylinderGeometry(t / 2, t / 2, len, 8), new THREE.Vector3(0, 1, 0));
+          seg.material = mkSteel(color, status);
+          polylineGroup.add(seg);
+        }
+        polylineGroup.userData.elementId = el.id;
+        addMesh(el, polylineGroup);
+        break;
       }
-      geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-      geometry.computeVertexNormals();
-      const color = status && status !== "unchanged" ? STATUS_COLORS[status] : 0x94a3b8;
-      const mesh = new THREE.Mesh(geometry, mkSteel(color, status, 0.85));
-      register(el.id, mesh);
-      group.add(mesh);
-      bbox.expandByObject(mesh);
+      case "box": {
+        const [sx, sy, sz] = g.size;
+        const isLed = elLed(el);
+        if (isLed) {
+          // face frontal (three +Z) recebe a textura de módulos LED
+          const baseMat = new THREE.MeshStandardMaterial({
+            color,
+            metalness: 0.2,
+            roughness: 0.35,
+            transparent: true,
+            opacity: status === "removed" || status === "added" ? 0.5 : 0.72,
+            emissive: status && status !== "unchanged" ? STATUS_COLORS[status] : 0xf97316,
+            emissiveIntensity: status && status !== "unchanged" ? 0.25 : 0.08,
+            side: THREE.DoubleSide,
+          });
+          const frontMat = baseMat.clone();
+          frontMat.map = panelTexture();
+          frontMat.emissiveMap = panelTexture();
+          frontMat.emissive = new THREE.Color(0xffffff);
+          frontMat.emissiveIntensity = status && status !== "unchanged" ? 0.35 : 0.5;
+          const geo = new THREE.BoxGeometry(sx, sz, sy);
+          const mesh = new THREE.Mesh(geo, [baseMat, baseMat, baseMat, baseMat, frontMat, baseMat]);
+          mesh.position.copy(v3(g.center));
+          if (g.rotation) {
+            const [rx, ry, rz] = g.rotation.map(THREE.MathUtils.degToRad);
+            mesh.rotation.set(rx, rz, ry); // model Y (prof.) → three Z; model Z (alt.) → three Y
+          }
+          const edges = new THREE.LineSegments(
+            new THREE.EdgesGeometry(geo),
+            new THREE.LineBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.55 }),
+          );
+          mesh.add(edges);
+          register(el.id, edges);
+          addMesh(el, mesh);
+        } else {
+          const mesh = new THREE.Mesh(new THREE.BoxGeometry(sx, sz, sy), mkSteel(color, status));
+          mesh.position.copy(v3(g.center));
+          if (g.rotation) {
+            const [rx, ry, rz] = g.rotation.map(THREE.MathUtils.degToRad);
+            mesh.rotation.set(rx, rz, ry);
+          }
+          addMesh(el, mesh);
+        }
+        break;
+      }
+      case "circle": {
+        const basis = planeBasis(g.plane ?? "XY");
+        const segs = 64;
+        const pts: THREE.Vector3[] = [];
+        for (let i = 0; i <= segs; i++) {
+          const a = (i / segs) * Math.PI * 2;
+          const p = basis(g.center.x + g.radius * Math.cos(a), g.center.y + g.radius * Math.sin(a));
+          pts.push(v3(p));
+        }
+        const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 }));
+        addMesh(el, line);
+        break;
+      }
+      case "arc": {
+        const basis = planeBasis(g.plane ?? "XY");
+        const span = g.end_angle - g.start_angle;
+        const segs = Math.max(8, Math.min(96, Math.ceil(Math.abs(span) / 4)));
+        const pts: THREE.Vector3[] = [];
+        for (let i = 0; i <= segs; i++) {
+          const a = THREE.MathUtils.degToRad(g.start_angle + (span * i) / segs);
+          const p = basis(g.center.x + g.radius * Math.cos(a), g.center.y + g.radius * Math.sin(a));
+          pts.push(v3(p));
+        }
+        const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 });
+        const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat);
+        const t = g.thickness;
+        if (t && t > 4) {
+          // arco com espessura → tubos por segmento
+          const arcGroup = new THREE.Group();
+          for (let i = 1; i < pts.length; i++) {
+            const seg = orientedMesh(pts[i - 1], pts[i], (len) => new THREE.CylinderGeometry(t / 2, t / 2, len, 8), new THREE.Vector3(0, 1, 0));
+            seg.material = mkSteel(color, status);
+            arcGroup.add(seg);
+          }
+          arcGroup.userData.elementId = el.id;
+          addMesh(el, arcGroup);
+        } else {
+          addMesh(el, line);
+        }
+        break;
+      }
+      case "polygon":
+      case "surface": {
+        const geometry = new THREE.BufferGeometry();
+        const pts = g.points.map((p) => v3(p));
+        const vertices: number[] = [];
+        for (let i = 1; i < pts.length - 1; i++) {
+          vertices.push(pts[0].x, pts[0].y, pts[0].z, pts[i].x, pts[i].y, pts[i].z, pts[i + 1].x, pts[i + 1].y, pts[i + 1].z);
+        }
+        geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+        geometry.computeVertexNormals();
+        const mesh = new THREE.Mesh(geometry, mkSteel(color, status, 0.85));
+        addMesh(el, mesh);
+        break;
+      }
+      case "mesh": {
+        const geometry = new THREE.BufferGeometry();
+        const vertices: number[] = [];
+        for (const face of g.faces) {
+          const idx = face.map((i) => g.vertices[i]).filter(Boolean);
+          if (idx.length < 3) continue;
+          for (let i = 1; i < idx.length - 1; i++) {
+            for (const p of [idx[0], idx[i], idx[i + 1]]) {
+              vertices.push(p.x, p.z, p.y);
+            }
+          }
+        }
+        geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+        geometry.computeVertexNormals();
+        const mesh = new THREE.Mesh(geometry, mkSteel(color, status, 0.9));
+        addMesh(el, mesh);
+        break;
+      }
+      case "text": {
+        const height = g.height ?? 120;
+        const sprite = labelSprite(g.text, height);
+        sprite.position.copy(v3(g.position));
+        addMesh(el, sprite);
+        break;
+      }
+      case "dimension": {
+        const diag = 1000;
+        const dimGroup = dimLine(
+          v3(g.start),
+          v3(g.end),
+          g.text ?? `${Math.round(v3(g.start).distanceTo(v3(g.end)))} mm`,
+          Math.max(diag * 0.03, 30),
+          new THREE.Vector3(0, 0, 60),
+        );
+        dimGroup.userData.elementId = el.id;
+        addMesh(el, dimGroup);
+        break;
+      }
+      default:
+        break;
     }
   }
 

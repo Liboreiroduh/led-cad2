@@ -11,8 +11,9 @@ export async function GET() {
   return ok({
     app: "LED JSON CAD",
     vendor: "LED Collor",
-    schema_version: 1,
+    schema_version: 2,
     units: "mm",
+    /** catálogo de perfis permanece apenas como REFERÊNCIA opcional (BOM/metadata) */
     profiles: PROFILES.map((p) => p.name),
     active_provider: cfg.active_provider,
     providers: listProviders(),

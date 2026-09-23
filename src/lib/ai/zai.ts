@@ -30,7 +30,18 @@ export const zaiProvider: AiProvider = {
       );
     }
 
-    const zai = await ZAI.create();
+    let zai: Awaited<ReturnType<typeof ZAI.create>>;
+    try {
+      zai = await ZAI.create();
+    } catch {
+      // Credenciais só existem no sandbox (.z-ai-config). Local → orientar trocar de provider.
+      throw new ProviderError(
+        "not_configured",
+        "zai",
+        "O SDK do Z.ai não encontrou credenciais locais (arquivo .z-ai-config). No ambiente local, use o provider Gemini ou Mock no Conector de IA.",
+        { retryable: false },
+      );
+    }
     const userPrompt = buildUserPrompt(
       JSON.stringify(input.currentProject, null, 1),
       input.userRequest,
@@ -113,7 +124,18 @@ export const zaiProvider: AiProvider = {
   },
   async test({ model, timeoutMs }) {
     const started = Date.now();
-    const zai = await ZAI.create();
+    let zai: Awaited<ReturnType<typeof ZAI.create>>;
+    try {
+      zai = await ZAI.create();
+    } catch {
+      // Credenciais só existem no sandbox (.z-ai-config). Local → orientar trocar de provider.
+      throw new ProviderError(
+        "not_configured",
+        "zai",
+        "O SDK do Z.ai não encontrou credenciais locais (arquivo .z-ai-config). No ambiente local, use o provider Gemini ou Mock no Conector de IA.",
+        { retryable: false },
+      );
+    }
     const raw = await withTimeout(
       zai.chat.completions.create({
         model,

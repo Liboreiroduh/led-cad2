@@ -11,6 +11,7 @@ import { projectHash, newProjectId } from "./cad/hashing";
 import { blankProject } from "./cad/blank";
 import { referencePresets, presetList } from "./cad/presets";
 import { parseProject, validateProject, type ValidationIssue } from "./cad/validation";
+import { panelDimsOf } from "./cad/geometry";
 import type { ProjectDocument } from "./cad/schema";
 
 const DATA_DIR = path.join(process.cwd(), "data");
@@ -138,10 +139,10 @@ class ProjectStore {
     const persisted = readJson<PersistShape | null>(PROJECT_FILE, null);
     if (persisted && persisted.project) {
       const check = validateProject(persisted.project);
-      if (check.ok) {
+      if (check.ok && check.doc) {
         this.state = {
           revision: persisted.revision ?? 1,
-          project: persisted.project,
+          project: check.doc, // normalizado para v2 (v1 legado é convertido no boot)
           hash: check.hash,
           saved_at: persisted.saved_at ?? new Date().toISOString(),
           updated_at: persisted.updated_at ?? new Date().toISOString(),
@@ -195,9 +196,7 @@ class ProjectStore {
   }
 
   private makeLogEntry(revision: number, project: ProjectDocument, source: RevisionSource, note: string): RevisionLogEntry {
-    const panel = project.panel
-      ? { width: project.panel.width, height: project.panel.height }
-      : null;
+    const panelDims = panelDimsOf(project);
     return {
       revision,
       hash: projectHash(project),
@@ -205,7 +204,7 @@ class ProjectStore {
       source,
       note,
       element_count: project.elements?.length ?? 0,
-      panel,
+      panel: panelDims ? { width: panelDims.width, height: panelDims.height } : null,
       project,
     };
   }
@@ -219,12 +218,19 @@ class ProjectStore {
     };
   }
 
+  /** Garante que QUALQUER documento que entre no estado seja v2 (v1 legado é convertido). */
+  private normalizeDoc(doc: ProjectDocument): ProjectDocument {
+    const result = parseProject(doc);
+    return result.ok ? result.project : doc;
+  }
+
   /** Substitui o projeto atual (com snapshot para undo + log de revisão). */
   private replace(
-    project: ProjectDocument,
+    projectRaw: ProjectDocument,
     source: RevisionSource = "manual_json",
     note = "",
   ): PersistShape {
+    const project = this.normalizeDoc(projectRaw);
     this.undoStack.push(this.snapshotCurrent());
     if (this.undoStack.length > 25) this.undoStack = this.undoStack.slice(-25);
     const now = new Date().toISOString();
@@ -275,7 +281,7 @@ class ProjectStore {
 
   applyValidatedRaw(
     raw: unknown,
-    source: ProjectDocument["metadata"]["source"],
+    source: string,
     revSource: RevisionSource = "import",
     note = "documento importado",
   ): PersistShape {
@@ -285,7 +291,10 @@ class ProjectStore {
       err.issues = result.errors;
       throw err;
     }
-    return this.replace(result.project, revSource, note);
+    // marca a origem no metadata livre (ai/manual/preset/import/mock)
+    const doc = result.project;
+    doc.metadata.source = source;
+    return this.replace(doc, revSource, note);
   }
 
   undo(): PersistShape | null {
@@ -293,10 +302,11 @@ class ProjectStore {
     if (!prev) return null;
     const now = new Date().toISOString();
     const revision = this.state.revision + 1;
+    const project = this.normalizeDoc(prev.project);
     this.state = {
       revision,
-      project: prev.project,
-      hash: projectHash(prev.project),
+      project,
+      hash: projectHash(project),
       saved_at: prev.saved_at,
       updated_at: now,
     };
@@ -495,7 +505,7 @@ const globalStore = globalThis as unknown as { __ledCadStore?: ProjectStore; __l
  * ("store.listRevisions is not a function"). Bumpar STORE_VERSION ao mudar a classe
  * força a recriação segura (todo estado é persistido em data/*.json e recarregado).
  */
-const STORE_VERSION = 6;
+const STORE_VERSION = 7;
 
 export function getStore(): ProjectStore {
   if (!globalStore.__ledCadStore || globalStore.__ledCadStoreV !== STORE_VERSION) {

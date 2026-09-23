@@ -12,6 +12,7 @@ import {
   type ProjectDocument,
 } from "@/lib/cad/schema";
 import { validateProject, type ValidationIssue } from "@/lib/cad/validation";
+import { isLegacyProject, legacyProjectToGeometry } from "@/lib/cad/legacy-adapter";
 import { getStore } from "@/lib/store";
 import { mockProvider } from "./mock";
 import { zaiProvider } from "./zai";
@@ -97,8 +98,9 @@ function pickFewShot(userRequest: string): { id: string; request: string; before
       if (ex.before_elements <= 0 || ex.after_elements <= 0) continue;
       if (ex.before_elements > FEW_SHOT_MAX_ELEMENTS) continue;
       if (ex.size_bytes > FEW_SHOT_MAX_BYTES) continue;
-      const before = JSON.stringify(ex.before);
-      const after = JSON.stringify(ex.after);
+      // exemplos salvos no formato v1 são convertidos para v2 (não ensinar formato errado à IA)
+      const before = normalizeExampleDoc(ex.before);
+      const after = normalizeExampleDoc(ex.after);
       if (!before || !after || before.length + after.length > FEW_SHOT_MAX_BYTES) continue;
       const exTokens = requestTokens(ex.request);
       let inter = 0;
@@ -115,6 +117,18 @@ function pickFewShot(userRequest: string): { id: string; request: string; before
     // sem exemplos — segue sem few-shot
   }
   return null;
+}
+
+/** Converte exemplo (legado v1 ou v2) para string JSON v2; null se inválido/enorme. */
+function normalizeExampleDoc(value: unknown): string | null {
+  try {
+    if (isLegacyProject(value)) {
+      return JSON.stringify(legacyProjectToGeometry(value));
+    }
+    return JSON.stringify(value);
+  } catch {
+    return null;
+  }
 }
 
 export interface TransformOutput {
@@ -138,6 +152,33 @@ function summarizeIssues(issues: ValidationIssue[]): string {
     .slice(0, 8)
     .map((i) => `- ${i.path}: ${i.message}`)
     .join("\n");
+}
+
+/**
+ * Reparo tolerante de envelope: a IA às vezes omite a raiz `project` (info do
+ * projeto) no documento candidato — isso NÃO é geometria; preservamos a info do
+ * documento atual em vez de falhar o transform inteiro.
+ */
+function repairProjectInfo(raw: unknown, current: ProjectDocument): unknown {
+  if (!raw || typeof raw !== "object") return raw;
+  const env = raw as Record<string, unknown>;
+  const doc = env["project"];
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return env;
+  const d = doc as Record<string, unknown>;
+  if (!d["project"]) {
+    return {
+      ...env,
+      project: {
+        schema_version: 2,
+        units: "mm",
+        project: current.project,
+        elements: Array.isArray(d["elements"]) ? d["elements"] : [],
+        assumptions: Array.isArray(d["assumptions"]) ? d["assumptions"] : [],
+        metadata: d["metadata"] ?? current.metadata ?? {},
+      },
+    };
+  }
+  return env;
 }
 
 function validateEnvelope(raw: unknown, provider: ProviderId): AITransformResponse {
@@ -247,8 +288,17 @@ export async function transformProject(input: {
         fewShot,
       });
       const raw = extractJson(result.text, providerId);
-      const response = validateEnvelope(raw, providerId);
+      const response = validateEnvelope(repairProjectInfo(raw, input.currentProject), providerId);
       const candidate = response.project;
+      // GUARDA DE SEGURANÇA: ready com elements vazio quando o atual tem elementos
+      // = modelo omitiu o documento (aplicar apagaria tudo). Retry com feedback claro.
+      if (candidate && candidate.elements.length === 0 && input.currentProject.elements.length > 0) {
+        throw Object.assign(new Error("candidato com elements vazio"), {
+          isEnvelope: true,
+          details:
+            "Você devolveu um documento com elements VAZIO. Devolva o documento COMPLETO: TODOS os elementos atuais preservando seus IDs, mais as alterações pedidas.",
+        });
+      }
       const warnings = candidate ? validateProject(candidate).warnings : [];
       const candidate_hash = candidate
         ? store.putPendingPreview(candidate, 0, "")
