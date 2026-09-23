@@ -77,7 +77,7 @@ export interface RevisionListItem {
   revision: number;
   hash: string;
   saved_at: string;
-  source: "init" | "ai_apply" | "manual_json" | "import" | "preset" | "undo" | "restore" | "new";
+  source: "init" | "ai_apply" | "manual_json" | "import" | "preset" | "undo" | "restore" | "new" | "rename";
   note: string;
   element_count: number;
   panel: { width: number; height: number } | null;
@@ -107,6 +107,11 @@ export const api = {
     call<ProjectState>("/api/project/new", { method: "POST", body: JSON.stringify({ name }) }),
   importProject: (project: unknown) =>
     call<ProjectState>("/api/project/import", { method: "POST", body: JSON.stringify({ project }) }),
+  renameProject: (name: string, base_revision: number, base_hash: string) =>
+    call<ProjectState & { message: string }>("/api/project/rename", {
+      method: "POST",
+      body: JSON.stringify({ name, base_revision, base_hash }),
+    }),
   listPresets: () =>
     call<{
       references: Array<{ id: string; name: string; description: string }>;

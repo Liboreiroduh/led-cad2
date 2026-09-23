@@ -5,10 +5,10 @@
  * Cada revisão pode ser COMPARADA com a atual (diff ghost no 3D) e restaurada
  * via fluxo padrão de preview → aplicar.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   History, RefreshCw, Loader2, GitCompare, Sparkles, Braces, Upload, FileJson,
-  Undo2, RotateCcw, FilePlus2, Circle, Monitor, FileText,
+  Undo2, RotateCcw, FilePlus2, Circle, Monitor, FileText, Pencil, Search, ListFilter,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
@@ -24,9 +24,20 @@ const SOURCE_META: Record<
   preset: { label: "Preset", color: "bg-emerald-100 text-emerald-800 border-emerald-300", dot: "bg-emerald-500", icon: <FileJson className="h-3 w-3" /> },
   undo: { label: "Desfeito", color: "bg-slate-100 text-slate-600 border-slate-300", dot: "bg-slate-400", icon: <Undo2 className="h-3 w-3" /> },
   restore: { label: "Restaurado", color: "bg-rose-100 text-rose-800 border-rose-300", dot: "bg-rose-500", icon: <RotateCcw className="h-3 w-3" /> },
+  rename: { label: "Renomeado", color: "bg-amber-100 text-amber-800 border-amber-300", dot: "bg-amber-500", icon: <Pencil className="h-3 w-3" /> },
   new: { label: "Novo", color: "bg-slate-100 text-slate-600 border-slate-300", dot: "bg-slate-400", icon: <FilePlus2 className="h-3 w-3" /> },
   init: { label: "Inicial", color: "bg-slate-100 text-slate-600 border-slate-300", dot: "bg-slate-300", icon: <Circle className="h-3 w-3" /> },
 };
+
+/** Filtros de fonte — agrupam as origens de revisão em categorias legíveis. */
+const SOURCE_FILTERS: Array<{ id: string; label: string; match: (s: RevisionListItem["source"]) => boolean }> = [
+  { id: "all", label: "Todas", match: () => true },
+  { id: "ai", label: "IA", match: (s) => s === "ai_apply" },
+  { id: "manual", label: "Manual", match: (s) => s === "manual_json" },
+  { id: "preset", label: "Preset", match: (s) => s === "preset" },
+  { id: "revert", label: "Undo/Restore", match: (s) => s === "undo" || s === "restore" },
+  { id: "other", label: "Outros", match: (s) => s === "import" || s === "init" || s === "new" || s === "rename" },
+];
 
 function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -51,6 +62,8 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
   const [error, setError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState<number | null>(null);
   const [pdfBusy, setPdfBusy] = useState<number | null>(null);
+  const [filter, setFilter] = useState<string>("all");
+  const [query, setQuery] = useState("");
 
   const downloadDiffPdf = async (rev: number) => {
     setPdfBusy(rev);
@@ -81,6 +94,22 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
   useEffect(() => {
     void load();
   }, [load, refreshKey]);
+
+  // filtro por fonte + busca textual (nota, rev, hash, contagem de elementos)
+  const filtered = useMemo(() => {
+    const f = SOURCE_FILTERS.find((x) => x.id === filter) ?? SOURCE_FILTERS[0];
+    const q = query.trim().toLowerCase();
+    return revisions.filter((r) => {
+      if (!f.match(r.source)) return false;
+      if (!q) return true;
+      return (
+        String(r.revision).includes(q) ||
+        r.hash.toLowerCase().includes(q) ||
+        r.note.toLowerCase().includes(q) ||
+        String(r.element_count).includes(q)
+      );
+    });
+  }, [revisions, filter, query]);
 
   const restore = async (rev: number) => {
     setRestoring(rev);
@@ -114,6 +143,42 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
         </button>
       </div>
 
+      <div className="px-3 py-2 border-b border-slate-200 bg-white space-y-1.5">
+        <div className="flex items-center gap-1 flex-wrap" role="group" aria-label="Filtrar revisões por fonte">
+          <ListFilter className="h-3 w-3 text-slate-400 mr-0.5" aria-hidden />
+          {SOURCE_FILTERS.map((f) => {
+            const active = filter === f.id;
+            const count = f.id === "all" ? revisions.length : revisions.filter((r) => f.match(r.source)).length;
+            return (
+              <button
+                key={f.id}
+                onClick={() => setFilter(f.id)}
+                aria-pressed={active}
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-all outline-none focus-visible:ring-2 focus-visible:ring-orange-400/70 ${
+                  active
+                    ? "border-orange-500 bg-orange-600 text-white shadow-sm"
+                    : "border-slate-200 bg-white text-slate-500 hover:border-orange-300 hover:text-orange-700"
+                }`}
+                title={`Filtrar: ${f.label} (${count})`}
+              >
+                {f.label}
+                <span className={`rounded-full px-1 text-[9px] ${active ? "bg-orange-500/60 text-white" : "bg-slate-100 text-slate-400"}`}>{count}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="relative">
+          <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-slate-400" aria-hidden />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="buscar por nota, rev, hash ou nº de elementos…"
+            aria-label="Buscar revisões"
+            className="w-full h-7 rounded-md border border-slate-200 bg-slate-50 pl-7 pr-2 text-[11px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:border-orange-400 focus:ring-1 focus:ring-orange-400/40 transition-colors"
+          />
+        </div>
+      </div>
+
       <div className="flex-1 overflow-y-auto cad-scroll p-3 min-h-0">
         {loading && revisions.length === 0 && (
           <div className="flex items-center gap-2 text-xs text-slate-500">
@@ -128,9 +193,14 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
             Nenhuma revisão registrada ainda. Cada aplicação da IA, importação, preset ou undo gera uma entrada.
           </div>
         )}
+        {!loading && revisions.length > 0 && filtered.length === 0 && (
+          <div className="text-xs text-slate-500 border border-dashed border-slate-300 rounded-lg p-3">
+            Nenhuma revisão corresponde ao filtro/busca atual. <button onClick={() => { setFilter("all"); setQuery(""); }} className="underline text-orange-700 hover:text-orange-800">limpar filtros</button>
+          </div>
+        )}
 
         <ol className="relative ml-2 border-l-2 border-slate-200 space-y-2.5">
-          {revisions.map((r) => {
+          {filtered.map((r) => {
             const meta = SOURCE_META[r.source] ?? SOURCE_META.init;
             const busy = comparingRev === r.revision;
             return (

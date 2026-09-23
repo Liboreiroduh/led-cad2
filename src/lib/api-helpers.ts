@@ -11,12 +11,29 @@ export function fail(status: number, type: string, message: string, extra?: Reco
   return NextResponse.json({ error: { type, message, ...extra } }, { status });
 }
 
+/**
+ * Detecção robusta de erros tipados: o Next.js dev compila cada rota em bundle
+ * próprio — a classe importada pelo roteador pode ser uma CÓPIA diferente da
+ * importada aqui, e `instanceof` falha (visto: transform 500 em conflito real).
+ * Comparamos também pelo `name` estável definido no construtor.
+ */
+export function isConflictError(e: unknown): boolean {
+  if (e instanceof ConflictError) return true;
+  return (e as Error)?.name === "ConflictError";
+}
+
+export function isAiTransformError(e: unknown): boolean {
+  if (e instanceof AiTransformError) return true;
+  return (e as Error)?.name === "AiTransformError";
+}
+
 export function handleError(e: unknown): NextResponse {
-  if (e instanceof ConflictError) {
+  if (isConflictError(e)) {
     return fail(409, "project_changed", "O projeto mudou desde o preview. Regenere o preview.", { retryable: false });
   }
-  if (e instanceof AiTransformError) {
-    return NextResponse.json({ error: e.payload }, { status: 502 });
+  if (isAiTransformError(e)) {
+    const err = e as AiTransformError;
+    return NextResponse.json({ error: err.payload }, { status: 502 });
   }
   const err = e as Error & { issues?: unknown };
   if (err?.issues) {

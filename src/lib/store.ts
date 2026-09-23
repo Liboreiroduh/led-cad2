@@ -36,7 +36,7 @@ export interface UndoEntry {
   saved_at: string;
 }
 
-export type RevisionSource = "init" | "ai_apply" | "manual_json" | "import" | "preset" | "undo" | "restore" | "new";
+export type RevisionSource = "init" | "ai_apply" | "manual_json" | "import" | "preset" | "undo" | "restore" | "new" | "rename";
 
 export interface RevisionLogEntry {
   revision: number;
@@ -257,6 +257,20 @@ class ProjectStore {
   ): PersistShape {
     this.checkConflict(baseRevision, baseHash);
     return this.replace(candidate, source, note);
+  }
+
+  /** Renomeia o projeto (metadata.name) como revisão própria — undo-able. */
+  renameProject(name: string, baseRevision: number, baseHash: string): PersistShape {
+    this.checkConflict(baseRevision, baseHash);
+    const trimmed = name.trim().replace(/\s+/g, " ").slice(0, 120);
+    if (!trimmed) throw new Error("nome do projeto não pode ficar vazio");
+    if (trimmed === this.state.project.project.name) {
+      // nada a fazer — devolve estado atual sem criar revisão inútil
+      return this.state;
+    }
+    const next = structuredClone(this.state.project);
+    next.project.name = trimmed;
+    return this.replace(next, "rename", `projeto renomeado para “${trimmed}”`);
   }
 
   applyValidatedRaw(
@@ -481,7 +495,7 @@ const globalStore = globalThis as unknown as { __ledCadStore?: ProjectStore; __l
  * ("store.listRevisions is not a function"). Bumpar STORE_VERSION ao mudar a classe
  * força a recriação segura (todo estado é persistido em data/*.json e recarregado).
  */
-const STORE_VERSION = 5;
+const STORE_VERSION = 6;
 
 export function getStore(): ProjectStore {
   if (!globalStore.__ledCadStore || globalStore.__ledCadStoreV !== STORE_VERSION) {

@@ -14,6 +14,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   FilePlus2, Upload, Undo2, FileSpreadsheet, FileDown, PlugZap, Loader2, X, Lock, RefreshCw,
   Camera, Keyboard, Layers3, Ruler, Crosshair, GitCompare, MoveHorizontal, Weight, ChevronDown, ChevronUp, Columns2,
+  Pencil, Check,
 } from "lucide-react";
 import { toast } from "sonner";
 import Viewer3D from "@/components/cad/Viewer3D";
@@ -46,7 +47,9 @@ interface CandidateState {
   hash: string;
 }
 
-const HISTORY_KEY = "led-json-cad:history:v1";
+// histórico do copiloto é escopado por projeto (id) — cada projeto tem a sua conversa
+const HISTORY_KEY_PREFIX = "led-json-cad:history:v2";
+const HISTORY_KEY_LEGACY = "led-json-cad:history:v1";
 const DOCK_WIDTH_KEY = "led-json-cad:dockwidth:v1";
 const DOCK_MIN = 320;
 const DOCK_MAX = 680;
@@ -89,6 +92,13 @@ export default function Home() {
   const [compareMode, setCompareMode] = useState<"ghost" | "split">("ghost");
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const [dockWidth, setDockWidth] = useState(DOCK_DEFAULT);
+  // renomear projeto inline na topbar
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const renameBusyRef = useRef(false);
+  const renameCancelRef = useRef(false);
   const dockDragRef = useRef<{ startX: number; startW: number } | null>(null);
   const dockWidthRef = useRef(dockWidth);
 
@@ -124,20 +134,40 @@ export default function Home() {
     ]);
   }, []);
 
-  // restaura histórico do localStorage
+  // restaura histórico do localStorage — escopado por projeto; dock width é global
+  const projectId = projectState?.project.project.id ?? null;
+  const historyKey = projectId ? `${HISTORY_KEY_PREFIX}:${projectId}` : null;
+  const [historyScope, setHistoryScope] = useState<string | null>(null);
   useEffect(() => {
+    if (!historyKey) {
+      setHistoryScope(null);
+      setHistory([]);
+      return;
+    }
     try {
-      const raw = localStorage.getItem(HISTORY_KEY);
-      if (raw) setHistory(JSON.parse(raw) as HistoryItem[]);
-      const w = localStorage.getItem(DOCK_WIDTH_KEY);
-      if (w) {
-        const n = Number.parseInt(w, 10);
-        if (Number.isFinite(n) && n >= DOCK_MIN && n <= DOCK_MAX) setDockWidth(n);
+      const raw = localStorage.getItem(historyKey);
+      if (raw) {
+        setHistory(JSON.parse(raw) as HistoryItem[]);
+      } else {
+        // migração única: o histórico legado (v1, global) vai para o primeiro projeto aberto
+        const legacy = localStorage.getItem(HISTORY_KEY_LEGACY);
+        if (legacy) {
+          setHistory(JSON.parse(legacy) as HistoryItem[]);
+          localStorage.removeItem(HISTORY_KEY_LEGACY);
+        } else {
+          setHistory([]);
+        }
       }
     } catch {
-      // ignora storage corrompido
+      setHistory([]);
     }
-  }, []);
+    setHistoryScope(historyKey);
+    const w = localStorage.getItem(DOCK_WIDTH_KEY);
+    if (w) {
+      const n = Number.parseInt(w, 10);
+      if (Number.isFinite(n) && n >= DOCK_MIN && n <= DOCK_MAX) setDockWidth(n);
+    }
+  }, [historyKey]);
 
   const refresh = useCallback(async () => {
     try {
@@ -221,12 +251,33 @@ export default function Home() {
   }, [pushHistory]);
 
   // ---------- transform via IA ----------
+  /** Notifica o usuário quando a transformação longa termina com a aba em segundo plano. */
+  const notifyTransformDone = useCallback((body: string) => {
+    try {
+      if (typeof Notification === "undefined") return;
+      if (document.visibilityState === "visible") return;
+      if (Notification.permission !== "granted") return;
+      new Notification("LED JSON CAD — IA respondeu", { body: body.slice(0, 140), tag: "led-cad-transform" });
+    } catch {
+      // Notification indisponível — ignora silenciosamente
+    }
+  }, []);
+
   const sendRequest = useCallback(
     async (text: string, attachments: Array<{ type: "image"; name: string; data_url: string }>) => {
       if (!projectState) return;
       pushHistory({ role: "user", text });
       setSending(true);
       setCandidate(null);
+      // pede permissão de notificação no envio (contexto: resposta pode levar ~2 min)
+      try {
+        if (typeof Notification !== "undefined" && Notification.permission === "default") {
+          void Notification.requestPermission();
+        }
+      } catch {
+        // ignora
+      }
+      let notifyBody: string | null = null;
       try {
         const r: TransformResult = await api.transform({
           request: text,
@@ -260,6 +311,7 @@ export default function Home() {
               candidate: r.candidate_project,
             },
           });
+          notifyBody = `Candidato pronto para revisão — ${r.diff_summary ?? r.explain}`;
         } else {
           pushHistory({
             role: "assistant",
@@ -276,20 +328,24 @@ export default function Home() {
               fewShotScore: r.meta.few_shot_score ?? null,
             },
           });
+          notifyBody = r.explain;
         }
       } catch (e) {
         const err = e as ApiCallError;
         const payload = err.payload;
+        const friendly = ERRORS_FRIENDLY[payload?.type ?? ""] ?? payload?.message ?? err.message;
         pushHistory({
           role: "error",
-          text: ERRORS_FRIENDLY[payload?.type ?? ""] ?? payload?.message ?? err.message,
+          text: friendly,
           meta: { errorType: payload?.type ?? "error" },
         });
+        notifyBody = `Falhou: ${friendly}`;
       } finally {
         setSending(false);
+        if (notifyBody) notifyTransformDone(notifyBody);
       }
     },
-    [projectState, pushHistory],
+    [projectState, pushHistory, notifyTransformDone],
   );
 
   // ---------- preview de candidato (JSON tab / validação) ----------
@@ -401,15 +457,58 @@ export default function Home() {
     pushHistory({ role: "info", text: "Preview cancelado — documento atual preservado." });
   }, [pushHistory]);
 
-  // limpa o histórico do copiloto (UI + localStorage)
+  // limpa o histórico do copiloto do projeto atual (UI + localStorage)
   const clearCopilotHistory = useCallback(() => {
     setHistory([]);
     try {
-      localStorage.removeItem(HISTORY_KEY);
+      if (historyKey) localStorage.removeItem(historyKey);
+      localStorage.removeItem(HISTORY_KEY_LEGACY);
     } catch {
       // ignora
     }
-  }, []);
+  }, [historyKey]);
+
+  // ---------- renomear projeto (topbar) ----------
+  const startRename = useCallback(() => {
+    if (!projectState || renameBusy) return;
+    setRenameValue(projectState.project.project.name);
+    setRenaming(true);
+    requestAnimationFrame(() => renameInputRef.current?.select());
+  }, [projectState, renameBusy]);
+
+  const commitRename = useCallback(async () => {
+    if (!projectState || !renaming || renameBusyRef.current) return;
+    if (renameCancelRef.current) {
+      renameCancelRef.current = false;
+      setRenaming(false);
+      return;
+    }
+    const name = renameValue.trim().replace(/\s+/g, " ");
+    setRenaming(false);
+    if (!name || name === projectState.project.project.name) return;
+    renameBusyRef.current = true;
+    setRenameBusy(true);
+    try {
+      const st = await api.renameProject(name, projectState.revision, projectState.hash);
+      setProjectState(st);
+      setHistoryRefreshKey((k) => k + 1);
+      toast.success(`Projeto renomeado — rev ${st.revision}`, {
+        action: { label: "Desfazer", onClick: () => void doUndo() },
+        duration: 6000,
+      });
+    } catch (e) {
+      const err = e as ApiCallError;
+      if (err.status === 409) {
+        toast.error("O projeto mudou no servidor — estado recarregado. Tente renomear de novo.");
+        void refresh();
+      } else {
+        toast.error(err.payload?.message ?? err.message);
+      }
+    } finally {
+      renameBusyRef.current = false;
+      setRenameBusy(false);
+    }
+  }, [projectState, renaming, renameValue, doUndo, refresh]);
 
   // ---------- status maps para o viewer ----------
   const { statuses, candidateStatuses } = useMemo((): { statuses: StatusMap; candidateStatuses: StatusMap } => {
@@ -482,18 +581,19 @@ export default function Home() {
     },
   };
 
-  // persiste histórico (sem candidatos antigos pesados)
+  // persiste histórico (sem candidatos antigos pesados) — só depois que o escopo do projeto carregou
   useEffect(() => {
+    if (!historyKey || historyScope !== historyKey) return;
     try {
       const slim = history.slice(-30).map((h) => ({
         ...h,
         meta: h.meta?.candidate ? { ...h.meta, candidate: null } : h.meta,
       }));
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(slim));
+      localStorage.setItem(historyKey, JSON.stringify(slim));
     } catch {
       // quota — ignora
     }
-  }, [history]);
+  }, [history, historyKey, historyScope]);
 
   const toggleHidden = useCallback((id: string) => {
     setHiddenIds((s) => {
@@ -542,9 +642,77 @@ export default function Home() {
 
           {project && (
             <div className="hidden md:flex items-center gap-2 ml-4 min-w-0">
-              <span className="text-sm font-medium truncate max-w-56" title={project.project.name}>
-                {project.project.name}
-              </span>
+              {renaming ? (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void commitRename();
+                  }}
+                  className="flex items-center gap-1"
+                  role="group"
+                  aria-label="Renomear projeto"
+                >
+                  <input
+                    ref={renameInputRef}
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        renameCancelRef.current = true;
+                        setRenaming(false);
+                      }
+                    }}
+                    onBlur={() => void commitRename()}
+                    maxLength={120}
+                    autoFocus
+                    aria-label="Novo nome do projeto"
+                    placeholder="nome do projeto"
+                    className="h-7 w-56 rounded-md border border-orange-400/60 bg-[#101a24] px-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-orange-500/50 transition-shadow"
+                  />
+                  <button
+                    type="submit"
+                    title="Confirmar (Enter)"
+                    aria-label="Confirmar renomeação"
+                    className="h-7 w-7 grid place-items-center rounded-md bg-orange-600 text-white hover:bg-orange-500 active:scale-95 transition-all focus-visible:ring-2 focus-visible:ring-orange-300 outline-none"
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      renameCancelRef.current = true;
+                      setRenaming(false);
+                    }}
+                    title="Cancelar (Esc)"
+                    aria-label="Cancelar renomeação"
+                    className="h-7 w-7 grid place-items-center rounded-md text-slate-400 hover:text-white hover:bg-slate-700 transition-colors focus-visible:ring-2 focus-visible:ring-slate-400 outline-none"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </form>
+              ) : (
+                <button
+                  onClick={startRename}
+                  disabled={renameBusy}
+                  className="group/rname flex items-center gap-1.5 max-w-56 rounded-md px-1.5 py-1 -mx-0.5 outline-none hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-orange-400/60 transition-colors"
+                  title="Renomear projeto"
+                  aria-label={`Renomear projeto ${project.project.name}`}
+                >
+                  <span className="text-sm font-medium truncate border-b border-dashed border-transparent group-hover/rname:border-slate-400 transition-colors">
+                    {project.project.name}
+                  </span>
+                  {renameBusy ? (
+                    <Loader2 className="h-3 w-3 animate-spin text-orange-400 shrink-0" aria-hidden />
+                  ) : (
+                    <Pencil
+                      className="h-3 w-3 text-slate-400 shrink-0 opacity-0 group-hover/rname:opacity-100 group-focus-visible/rname:opacity-100 transition-opacity"
+                      aria-hidden
+                    />
+                  )}
+                </button>
+              )}
               <Badge variant="outline" className="text-slate-300 border-slate-500">
                 rev {projectState!.revision}
               </Badge>
@@ -1083,7 +1251,7 @@ function TopBtn({
       onClick={onClick}
       disabled={disabled}
       title={title ?? label}
-      className={`h-9 px-2 sm:px-2.5 text-[10px] sm:text-[11px] font-semibold gap-1 ${
+      className={`h-9 px-2 sm:px-2.5 text-[10px] sm:text-[11px] font-semibold gap-1 rounded-md focus-visible:ring-2 focus-visible:ring-orange-400/70 outline-none transition-colors ${
         highlight ? "text-orange-400 hover:text-orange-300 hover:bg-slate-700" : "text-slate-200 hover:text-white hover:bg-slate-700"
       }`}
     >

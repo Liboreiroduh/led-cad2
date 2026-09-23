@@ -333,7 +333,12 @@ function CopilotTab(props: CopilotDockProps) {
           <Button variant="outline" size="icon" onClick={() => fileRef.current?.click()} aria-label="Anexar imagem" title="Anexar imagem/croqui">
             <Paperclip className="h-4 w-4" />
           </Button>
-          <Button onClick={submit} disabled={props.sending || !input.trim()} className="flex-1 bg-orange-600 hover:bg-orange-700 text-white font-semibold" aria-label="Enviar pedido para a IA">
+          <Button
+            onClick={submit}
+            disabled={props.sending || !input.trim()}
+            className="flex-1 bg-gradient-to-b from-orange-500 to-orange-700 hover:from-orange-500 hover:to-orange-600 text-white font-semibold shadow-sm shadow-orange-900/20 active:scale-[0.98] transition-all"
+            aria-label="Enviar pedido para a IA"
+          >
             {props.sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             ENVIAR
           </Button>
