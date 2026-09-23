@@ -9,7 +9,9 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { Columns2, X, MousePointer2, Loader2 } from "lucide-react";
+import { motion } from "framer-motion";
+import { Columns2, X, MousePointer2, Loader2, Camera } from "lucide-react";
+import { toast } from "sonner";
 import { buildProjectGroup, buildEnvironment, viewDirection, type StatusMap } from "./sceneBuilder";
 import type { ProjectDocument } from "@/lib/cad/schema";
 
@@ -114,6 +116,8 @@ export default function CompareSplit(props: CompareSplitProps) {
     const b = initPane(mountB);
     stateARef.current = a;
     stateBRef.current = b;
+    // expõe para a exportação composta (função livre fora do componente)
+    (window as unknown as { __abPanes?: [PaneState | null, PaneState | null] }).__abPanes = [a, b];
 
     // órbita sincronizada: câmera/target copiados com guard anti-loop
     const syncFrom = (from: PaneState, to: PaneState) => {
@@ -147,6 +151,7 @@ export default function CompareSplit(props: CompareSplitProps) {
       }
       stateARef.current = null;
       stateBRef.current = null;
+      (window as unknown as { __abPanes?: [PaneState | null, PaneState | null] | null }).__abPanes = null;
     };
   }, []);
 
@@ -188,6 +193,7 @@ export default function CompareSplit(props: CompareSplitProps) {
 
   return (
     <div className="absolute inset-0 z-[15] flex flex-col lg:flex-row gap-1.5 p-1.5 bg-slate-200/60 backdrop-blur-[2px]" role="region" aria-label="Comparação lado a lado entre revisões">
+      <ExportButton onExport={() => exportCompositeImage(revA, revB, diffCounts)} />
       {/* PAINEL A — documento atual */}
       <Pane
         mountRef={mountARef}
@@ -216,7 +222,12 @@ export default function CompareSplit(props: CompareSplitProps) {
       />
 
       {/* cabeçalho flutuante */}
-      <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-[#1b2836]/95 backdrop-blur text-white rounded-full pl-3 pr-1.5 py-1.5 shadow-xl border border-slate-600/60 z-10 whitespace-nowrap max-w-[calc(100%-16px)]">
+      <motion.div
+        initial={{ opacity: 0, y: -10, scale: 0.96 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ type: "spring", stiffness: 380, damping: 26 }}
+        className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-[#1b2836]/95 backdrop-blur text-white rounded-full pl-3 pr-1.5 py-1.5 shadow-xl border border-slate-600/60 z-10 whitespace-nowrap max-w-[calc(100%-16px)]"
+      >
         <Columns2 className="h-4 w-4 text-orange-400 shrink-0" aria-hidden />
         <span className="text-[11px] font-bold tracking-wide whitespace-nowrap">
           COMPARAÇÃO A/B · rev {revA} <span className="text-slate-400">vs</span> rev {revB}
@@ -229,6 +240,14 @@ export default function CompareSplit(props: CompareSplitProps) {
           <MousePointer2 className="h-3 w-3" /> órbita sincronizada
         </span>
         <button
+          onClick={() => exportCompositeImage(revA, revB, diffCounts)}
+          className="h-6 w-6 grid place-items-center rounded-full bg-slate-700 hover:bg-orange-600 text-slate-200 hover:text-white transition-colors"
+          aria-label="Exportar imagem A/B lado a lado"
+          title="Exportar imagem única A/B (PNG)"
+        >
+          <Camera className="h-3.5 w-3.5" />
+        </button>
+        <button
           onClick={props.onClose}
           className="h-6 w-6 grid place-items-center rounded-full bg-slate-700 hover:bg-slate-600 text-slate-200 transition-colors"
           aria-label="Fechar comparação A/B"
@@ -236,8 +255,149 @@ export default function CompareSplit(props: CompareSplitProps) {
         >
           <X className="h-3.5 w-3.5" />
         </button>
-      </div>
+      </motion.div>
     </div>
+  );
+}
+
+/* ------------------------- exportação A/B (imagem única) ------------------------- */
+
+/**
+ * Exporta a comparação A/B como UMA imagem PNG: renderiza os dois painéis,
+ * compõe lado a lado com cabeçalho (título, counts de diff, data, branding)
+ * e dispara o download. Composição em resolução nativa dos canvas (até 2x DPR),
+ * limitada a 2400px de largura para não gerar arquivos gigantes.
+ */
+async function exportCompositeImage(
+  revA: number,
+  revB: number,
+  counts: { added: number; removed: number; modified: number },
+): Promise<void> {
+  try {
+    const a = (window as unknown as { __abPanes?: [PaneState | null, PaneState | null] }).__abPanes;
+    if (!a || !a[0] || !a[1]) throw new Error("viewports indisponíveis");
+    const [pa, pb] = a;
+    // render explícito garante o framebuffer preenchido sem preserveDrawingBuffer
+    pa.renderer.render(pa.scene, pa.camera);
+    pb.renderer.render(pb.scene, pb.camera);
+    const ca = pa.renderer.domElement;
+    const cb = pb.renderer.domElement;
+
+    const MARGIN = 28;
+    const GAP = 16;
+    const HEADER = 96;
+    const FOOTER = 44;
+    const rawW = ca.width + cb.width + GAP;
+    const rowH = Math.max(ca.height, cb.height);
+    const scale = Math.min(1, 2400 / rawW);
+    const W = Math.round(rawW * scale) + MARGIN * 2;
+    const H = Math.round(rowH * scale) + HEADER + FOOTER + MARGIN * 2;
+
+    const out = document.createElement("canvas");
+    out.width = W;
+    out.height = H;
+    const ctx = out.getContext("2d");
+    if (!ctx) throw new Error("canvas 2d indisponível");
+
+    // fundo + header
+    ctx.fillStyle = "#e8ecf1";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#1b2836";
+    ctx.fillRect(0, 0, W, HEADER);
+    ctx.fillStyle = "#f97316"; // acento laranja
+    ctx.fillRect(0, HEADER - 5, W, 5);
+
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 26px system-ui, sans-serif";
+    ctx.fillText("COMPARAÇÃO A/B — LED JSON CAD", MARGIN, 38);
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "500 17px system-ui, sans-serif";
+    ctx.fillText(
+      `rev ${revA} (atual) vs rev ${revB} · +${counts.added} ~${counts.modified} -${counts.removed} · ${new Date().toLocaleString("pt-BR")}`,
+      MARGIN,
+      68,
+    );
+    // branding à direita
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#f97316";
+    ctx.font = "800 20px system-ui, sans-serif";
+    ctx.fillText("LED Collor", W - MARGIN, 44);
+    ctx.textAlign = "left";
+
+    // painéis A e B
+    const drawPane = (
+      src: HTMLCanvasElement,
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      label: string,
+      sub: string,
+      accent: string,
+    ) => {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(x - 2, y - 2, w + 4, h + 4);
+      ctx.drawImage(src, x, y, w, h);
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 4;
+      ctx.strokeRect(x - 2, y - 2, w + 4, h + 4);
+      // etiqueta inferior do painel
+      ctx.fillStyle = accent;
+      ctx.fillRect(x, y + h + 8, 10, 10);
+      ctx.fillStyle = "#334155";
+      ctx.font = "700 18px system-ui, sans-serif";
+      ctx.fillText(label, x + 18, y + h + 19);
+      const labelW = ctx.measureText(label).width;
+      ctx.fillStyle = "#64748b";
+      ctx.font = "500 15px system-ui, sans-serif";
+      ctx.fillText(sub, x + 18 + labelW + 12, y + h + 18);
+    };
+    const paneW = Math.round(ca.width * scale);
+    const paneH = Math.round(ca.height * scale);
+    const y0 = HEADER + MARGIN;
+    drawPane(ca, MARGIN, y0, paneW, paneH, "A", `ATUAL · rev ${revA}`, "#f43f5e");
+    drawPane(cb, MARGIN + paneW + GAP, y0, Math.round(cb.width * scale), Math.round(cb.height * scale), "B", `RESTAURÁVEL · rev ${revB}`, "#10b981");
+
+    // rodapé (disclaimer à esquerda; counts à direita só se couber sem sobreposição)
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "500 14px system-ui, sans-serif";
+    const disclaimer = "ESBOÇO DE REFERÊNCIA GEOMÉTRICO — NÃO UTILIZAR PARA FABRICAÇÃO SEM REVISÃO TÉCNICA";
+    const countsText = `+${counts.added} adicionados · ~${counts.modified} modificados · -${counts.removed} removidos`;
+    ctx.fillText(disclaimer, MARGIN, H - MARGIN + 6);
+    const disW = ctx.measureText(disclaimer).width;
+    const countsW = ctx.measureText(countsText).width;
+    if (MARGIN + disW + 24 + countsW < W - MARGIN) {
+      ctx.textAlign = "right";
+      ctx.fillText(countsText, W - MARGIN, H - MARGIN + 6);
+      ctx.textAlign = "left";
+    }
+
+    const blob = await new Promise<Blob | null>((resolve) => out.toBlob(resolve, "image/png"));
+    if (!blob) throw new Error("falha ao codificar PNG");
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `led-cad-ab-rev${revA}-rev${revB}.png`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    toast.success("Imagem A/B exportada");
+  } catch (e) {
+    toast.error(`Falha ao exportar A/B: ${(e as Error).message}`);
+  }
+}
+
+function ExportButton({ onExport }: { onExport: () => void }) {
+  return (
+    <button
+      onClick={onExport}
+      className="hidden sm:flex absolute bottom-3 right-3 z-10 flex items-center gap-1.5 bg-white/92 backdrop-blur hover:bg-orange-600 hover:text-white text-slate-700 border border-slate-200 shadow-lg rounded-full px-3 py-1.5 text-[11px] font-bold transition-colors"
+      title="Exportar comparação A/B como imagem única (PNG)"
+      aria-label="Exportar imagem A/B"
+    >
+      <Camera className="h-3.5 w-3.5" /> EXPORTAR A/B
+    </button>
   );
 }
 

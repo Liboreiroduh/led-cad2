@@ -148,17 +148,22 @@ export default function Home() {
     }
   }, []);
 
+  // sincroniza rótulo do provider ativo + suporte a visão (usado no boot, rodapé e trocas rápidas)
+  const refreshProviderInfo = useCallback(async () => {
+    try {
+      const m = await api.meta();
+      const active = m.providers.find((p) => p.active) ?? m.providers[0];
+      setProviderLabel(`${active?.label ?? "mock"} · ${active?.current_model ?? ""}`);
+      setActiveVision(active?.supports_image ?? true);
+    } catch {
+      setProviderLabel("mock · mock-transformer-v1");
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
-    void api
-      .meta()
-      .then((m) => {
-        const active = m.providers.find((p) => p.active) ?? m.providers[0];
-        setProviderLabel(`${active?.label ?? "mock"} · ${active?.current_model ?? ""}`);
-        setActiveVision(active?.supports_image ?? true);
-      })
-      .catch(() => setProviderLabel("mock · mock-transformer-v1"));
-  }, [refresh]);
+    void refreshProviderInfo();
+  }, [refresh, refreshProviderInfo]);
 
   // ref síncrono do restoreInfo para uso no handler de teclado (evita stale closure)
   const restoreInfoRef = useRef<number | null>(null);
@@ -341,7 +346,10 @@ export default function Home() {
           ? `Revisão ${restoreInfo} restaurada como revision ${st.revision}.`
           : `Candidato aplicado — revision ${st.revision}.`,
       });
-      toast.success(restoreInfo !== null ? `Revisão ${restoreInfo} restaurada — rev ${st.revision}` : `Aplicado — revision ${st.revision}`);
+      toast.success(
+        restoreInfo !== null ? `Revisão ${restoreInfo} restaurada — rev ${st.revision}` : `Aplicado — revision ${st.revision}`,
+        { action: { label: "Desfazer", onClick: () => void doUndo() }, duration: 6000 },
+      );
     } catch (e) {
       const err = e as ApiCallError;
       if (err.status === 409) {
@@ -353,7 +361,7 @@ export default function Home() {
         toast.error(err.payload?.message ?? err.message);
       }
     }
-  }, [candidate, restoreInfo, pushHistory, refresh]);
+  }, [candidate, restoreInfo, pushHistory, refresh, doUndo]);
 
   // ---------- comparação com revisão do histórico ----------
   const compareRevision = useCallback(async (rev: number) => {
@@ -392,6 +400,16 @@ export default function Home() {
     setRestoreInfo(null);
     pushHistory({ role: "info", text: "Preview cancelado — documento atual preservado." });
   }, [pushHistory]);
+
+  // limpa o histórico do copiloto (UI + localStorage)
+  const clearCopilotHistory = useCallback(() => {
+    setHistory([]);
+    try {
+      localStorage.removeItem(HISTORY_KEY);
+    } catch {
+      // ignora
+    }
+  }, []);
 
   // ---------- status maps para o viewer ----------
   const { statuses, candidateStatuses } = useMemo((): { statuses: StatusMap; candidateStatuses: StatusMap } => {
@@ -607,19 +625,29 @@ export default function Home() {
               </div>
             )}
 
-            {/* COMPARAÇÃO A/B — dois viewports sincronizados (restauração de revisão) */}
-            {splitActive && project && candidate && (
-              <CompareSplitNoSSR
-                docA={project}
-                revA={projectState!.revision}
-                docB={candidate.project}
-                revB={restoreInfo!}
-                statusesA={statuses}
-                statusesB={candidateStatuses}
-                diffCounts={candidate.diff.counts}
-                onClose={() => setCompareMode("ghost")}
-              />
-            )}
+            {/* COMPARAÇÃO A/B — dois viewports sincronizados (restauração de revisão) com crossfade */}
+            <AnimatePresence>
+              {splitActive && project && candidate && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.985 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.985 }}
+                  transition={{ duration: 0.2, ease: "easeOut" }}
+                  className="absolute inset-0 z-[15]"
+                >
+                  <CompareSplitNoSSR
+                    docA={project}
+                    revA={projectState!.revision}
+                    docB={candidate.project}
+                    revB={restoreInfo!}
+                    statusesA={statuses}
+                    statusesB={candidateStatuses}
+                    diffCounts={candidate.diff.counts}
+                    onClose={() => setCompareMode("ghost")}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* vistas — linha única com scroll em telas pequenas + atalhos (ocultas na comparação A/B) */}
             {!splitActive && (
@@ -979,6 +1007,8 @@ export default function Home() {
                   onIsolateGroup={isolateGroup}
                   isolatedGroup={isolatedGroup}
                   onFocusElement={focusElement}
+                  onClearHistory={clearCopilotHistory}
+                  onProviderChanged={() => void refreshProviderInfo()}
                   candidateDoc={candidate?.project ?? null}
                   comparingRev={comparingRev}
                   onCompareRevision={(rev) => void compareRevision(rev)}
@@ -1007,13 +1037,7 @@ export default function Home() {
             <button
               onClick={() => {
                 void refresh();
-                void api
-                  .meta()
-                  .then((m) => {
-                    const active = m.providers.find((p) => p.active) ?? m.providers[0];
-                    setProviderLabel(`${active?.label ?? "mock"} · ${active?.current_model ?? ""}`);
-                  })
-                  .catch(() => undefined);
+                void refreshProviderInfo();
               }}
               title="Atualizar status"
               className="hover:text-white"
@@ -1028,13 +1052,7 @@ export default function Home() {
           open={providerModalOpen}
           onOpenChange={setProviderModalOpen}
           onActivated={() => {
-            void api
-              .meta()
-              .then((m) => {
-                const active = m.providers.find((p) => p.active) ?? m.providers[0];
-                setProviderLabel(`${active?.label ?? "mock"} · ${active?.current_model ?? ""}`);
-              })
-              .catch(() => undefined);
+            void refreshProviderInfo();
           }}
         />
         <BomDialog open={bomOpen} onOpenChange={setBomOpen} />

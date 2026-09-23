@@ -13,7 +13,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   Send, Paperclip, Copy, CheckCircle2, AlertTriangle, Info, FileJson,
-  Save, Loader2, RotateCcw, Download, Upload, Braces, Sparkles, Trash2, Move, Replace, CopyPlus, ListTree, History, GraduationCap, ImageOff,
+  Save, Loader2, RotateCcw, Download, Upload, Braces, Sparkles, Trash2, Move, Replace, CopyPlus, ListTree, History, GraduationCap, ImageOff, Eye,
 } from "lucide-react";
 import { api, ApiCallError } from "@/lib/cad/client-api";
 import type { Assumption, ProjectDocument, ProjectDiff } from "@/lib/cad/schema";
@@ -55,6 +55,10 @@ interface CopilotDockProps {
   onCompareRevision: (rev: number) => void;
   historyRefreshKey: number;
   onRevisionRestored: () => void;
+  /** limpa o histórico do copiloto (UI + localStorage) */
+  onClearHistory: () => void;
+  /** chamado após trocar provider/modelo pela via rápida (ex.: ativar visão) — re-sincroniza meta */
+  onProviderChanged?: () => void;
 }
 
 function assumptionText(a: Assumption): string {
@@ -125,10 +129,56 @@ function CopilotTab(props: CopilotDockProps) {
   const [attachments, setAttachments] = useState<Array<{ type: "image"; name: string; data_url: string }>>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [visionOption, setVisionOption] = useState<{ id: "zai" | "gemini"; label: string; model: string } | null>(null);
+  const [switching, setSwitching] = useState(false);
+  const warnVisible = attachments.length > 0 && props.activeVision === false;
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [props.history, props.sending]);
+
+  // ao anexar sem visão, descobre a melhor opção vision disponível (Z.ai sempre configurado no backend)
+  useEffect(() => {
+    if (!warnVisible) return;
+    let cancel = false;
+    api
+      .aiProviders()
+      .then((r) => {
+        if (cancel) return;
+        const zai = r.providers.find((p) => p.id === "zai");
+        if (zai?.configured) {
+          const vm = zai.default_models.find((m) => /4\.5v|4\.6v|vision/i.test(m));
+          if (vm) {
+            setVisionOption({ id: "zai", label: zai.label, model: vm });
+            return;
+          }
+        }
+        const gem = r.providers.find((p) => p.id === "gemini");
+        if (gem?.configured) setVisionOption({ id: "gemini", label: gem.label, model: gem.current_model });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancel = true;
+    };
+  }, [warnVisible]);
+
+  const activateVision = async () => {
+    if (!visionOption) return;
+    setSwitching(true);
+    try {
+      await api.saveAiConfig({
+        provider: visionOption.id,
+        target: visionOption.id === "gemini" || visionOption.id === "zai" ? visionOption.id : undefined,
+        model: visionOption.model,
+      });
+      toast.success(`Visão ativada — ${visionOption.label} · ${visionOption.model}`);
+      props.onProviderChanged?.();
+    } catch (e) {
+      toast.error((e as ApiCallError).message);
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   const submit = () => {
     const text = input.trim();
@@ -155,6 +205,10 @@ function CopilotTab(props: CopilotDockProps) {
 
   return (
     <>
+      {/* barra fina do histórico da sessão */}
+      {props.history.length > 0 && (
+        <SessionBar count={props.history.length} onClear={props.onClearHistory} />
+      )}
       <div ref={scrollRef} className="flex-1 overflow-y-auto cad-scroll p-3 space-y-3 min-h-0">
         {props.history.length === 0 && (
           <div className="rounded-xl border border-dashed border-slate-300 bg-gradient-to-b from-slate-50 to-white p-4 text-xs text-slate-500 leading-relaxed">
@@ -216,17 +270,34 @@ function CopilotTab(props: CopilotDockProps) {
       <ExamplesManager />
 
       <div className="border-t border-slate-200 p-3 space-y-2">
-        {attachments.length > 0 && props.activeVision === false && (
-          <button
-            onClick={props.onOpenProviders}
-            className="w-full flex items-center gap-2 text-left text-[11px] bg-amber-50 border border-amber-300 text-amber-800 rounded-lg px-2.5 py-2 hover:bg-amber-100 transition-colors"
+        {warnVisible && (
+          <div
+            className="bg-amber-50 border border-amber-300 text-amber-800 rounded-lg px-2.5 py-2 text-[11px] space-y-1.5"
             role="alert"
           >
-            <ImageOff className="h-4 w-4 shrink-0 text-amber-600" />
-            <span className="min-w-0">
-              <span className="font-semibold">Modelo ativo não processa imagens.</span> O anexo será rejeitado — troque para um modelo vision (ex.: glm-4.5v).
-            </span>
-          </button>
+            <div className="flex items-center gap-2">
+              <ImageOff className="h-4 w-4 shrink-0 text-amber-600" />
+              <span className="min-w-0">
+                <span className="font-semibold">Modelo ativo não processa imagens.</span> O anexo será rejeitado.
+              </span>
+            </div>
+            {visionOption ? (
+              <Button
+                size="sm"
+                disabled={switching}
+                onClick={() => void activateVision()}
+                className="w-full h-7 bg-amber-600 hover:bg-amber-700 text-white text-[10.5px] font-bold"
+                title={`Troca para ${visionOption.label} · ${visionOption.model} (aceita imagens)`}
+              >
+                {switching ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> : <Eye className="h-3.5 w-3.5 mr-1" />}
+                ATIVAR VISÃO · {visionOption.model}
+              </Button>
+            ) : (
+              <button onClick={props.onOpenProviders} className="underline hover:text-amber-900">
+                configurar um provider com visão no Conector de IA
+              </button>
+            )}
+          </div>
         )}
         {attachments.length > 0 && (
           <div className="flex gap-2">
@@ -267,9 +338,15 @@ function CopilotTab(props: CopilotDockProps) {
             ENVIAR
           </Button>
         </div>
-        <button onClick={props.onOpenProviders} className="w-full text-left text-[11px] text-slate-500 hover:text-orange-700 transition-colors truncate" title="Abrir conector de IA">
-          IA ativa: {props.activeProviderLabel}
-          {props.activeVision === false ? " · sem visão" : ""} <span className="underline">trocar</span>
+        <button onClick={props.onOpenProviders} className="w-full text-left text-[11px] text-slate-500 hover:text-orange-700 transition-colors truncate flex items-center" title="Abrir conector de IA">
+          <span
+            className={`inline-block h-1.5 w-1.5 rounded-full mr-1.5 shrink-0 ${props.activeVision === false ? "bg-amber-500" : "bg-emerald-500"}`}
+            aria-hidden
+          />
+          <span className="truncate">
+            IA ativa: {props.activeProviderLabel}
+            {props.activeVision === false ? " · sem visão" : ""} <span className="underline">trocar</span>
+          </span>
         </button>
       </div>
     </>
@@ -299,6 +376,40 @@ function Chip({ icon, label, onClick }: { icon: React.ReactNode; label: string; 
       {icon}
       {label}
     </button>
+  );
+}
+
+/**
+ * Barra fina acima do chat com contagem de mensagens e botão LIMPAR
+ * (confirmação em 2 cliques com janela de 3s — mesmo padrão do ExamplesManager).
+ */
+function SessionBar({ count, onClear }: { count: number; onClear: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  return (
+    <div className="flex items-center justify-between px-3 py-1 border-b border-slate-100 bg-slate-50/70 text-[10px] text-slate-400 shrink-0">
+      <span className="flex items-center gap-1">
+        <History className="h-3 w-3" /> {count} mensagem{count === 1 ? "" : "ens"} nesta sessão
+      </span>
+      <button
+        onClick={() => {
+          if (!confirming) {
+            setConfirming(true);
+            setTimeout(() => setConfirming(false), 3000);
+          } else {
+            setConfirming(false);
+            onClear();
+            toast.success("Histórico do copiloto limpo");
+          }
+        }}
+        className={`flex items-center gap-1 rounded px-1.5 py-0.5 font-semibold transition-colors ${
+          confirming ? "bg-red-100 text-red-700" : "hover:text-slate-600"
+        }`}
+        title={confirming ? "Clique novamente para confirmar" : "Limpar mensagens da sessão"}
+        aria-label="Limpar histórico do copiloto"
+      >
+        <Trash2 className="h-3 w-3" /> {confirming ? "confirmar?" : "limpar"}
+      </button>
+    </div>
   );
 }
 

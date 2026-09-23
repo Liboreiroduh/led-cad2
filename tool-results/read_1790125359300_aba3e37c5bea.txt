@@ -1,0 +1,1190 @@
+     1→"use client";
+     2→
+     3→/**
+     4→ * LED JSON CAD — página principal.
+     5→ * JSON do projeto é a autoridade; canvas é visualização; IA transforma documentos;
+     6→ * diff calculado pelo sistema; preview antes de apply; undo por snapshot.
+     7→ */
+     8→import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+     9→import dynamic from "next/dynamic";
+    10→import { AnimatePresence, motion } from "framer-motion";
+    11→import { Button } from "@/components/ui/button";
+    12→import { Badge } from "@/components/ui/badge";
+    13→import { TooltipProvider } from "@/components/ui/tooltip";
+    14→import {
+    15→  FilePlus2, Upload, Undo2, FileSpreadsheet, FileDown, PlugZap, Loader2, X, Lock, RefreshCw,
+    16→  Camera, Keyboard, Layers3, Ruler, Crosshair, GitCompare, MoveHorizontal, Weight, ChevronDown, ChevronUp, Columns2,
+    17→} from "lucide-react";
+    18→import { toast } from "sonner";
+    19→import Viewer3D from "@/components/cad/Viewer3D";
+    20→import { CopilotDock, type DockTab } from "@/components/cad/CopilotDock";
+    21→import { ProviderModal } from "@/components/cad/ProviderModal";
+    22→import { BomDialog } from "@/components/cad/BomDialog";
+    23→import { VIEW_LABELS, VIEWS, type StatusMap, type ViewMode } from "@/components/cad/sceneBuilder";
+    24→import { api, ApiCallError, type ProjectState, type TransformResult, type PreviewResult } from "@/lib/cad/client-api";
+    25→import { estimateElementWeightKg } from "@/lib/cad/bom";
+    26→import type { ProjectDiff, ProjectDocument } from "@/lib/cad/schema";
+    27→import type { HistoryItem } from "@/components/cad/types";
+    28→
+    29→const Viewer3DNoSSR = dynamic(() => import("@/components/cad/Viewer3D"), {
+    30→  ssr: false,
+    31→  loading: () => (
+    32→    <div className="absolute inset-0 flex items-center justify-center bg-slate-100 text-slate-400 text-sm">
+    33→      <Loader2 className="h-6 w-6 animate-spin mr-2" /> carregando viewport 3D…
+    34→    </div>
+    35→  ),
+    36→});
+    37→
+    38→const CompareSplitNoSSR = dynamic(() => import("@/components/cad/CompareSplit"), { ssr: false });
+    39→
+    40→interface CandidateState {
+    41→  project: ProjectDocument;
+    42→  diff: ProjectDiff;
+    43→  diffSummary: string;
+    44→  baseRevision: number;
+    45→  baseHash: string;
+    46→  hash: string;
+    47→}
+    48→
+    49→const HISTORY_KEY = "led-json-cad:history:v1";
+    50→const DOCK_WIDTH_KEY = "led-json-cad:dockwidth:v1";
+    51→const DOCK_MIN = 320;
+    52→const DOCK_MAX = 680;
+    53→const DOCK_DEFAULT = 390;
+    54→
+    55→const ERRORS_FRIENDLY: Record<string, string> = {
+    56→  provider_timeout: "O provider de IA excedeu o tempo limite. Tente novamente — se persistir, troque o modelo no Conector de IA.",
+    57→  invalid_json: "A IA devolveu um JSON fora do contrato após 2 tentativas. Reformule o pedido ou troque o provider.",
+    58→  invalid_schema: "A IA devolveu um documento inválido (perfis/geometry fora das regras). Detalhes no histórico.",
+    59→  not_configured: "Provider não configurado — abra o CONECTOR DE IA e informe a API key.",
+    60→  unsupported_attachment: "Este provider/modelo não suporta este tipo de anexo. Use um modelo vision (ex.: glm-4.5v).",
+    61→  project_changed: "O projeto mudou desde o preview — regenere o candidato.",
+    62→  network: "Falha de rede ao contatar o servidor.",
+    63→};
+    64→
+    65→export default function Home() {
+    66→  const [projectState, setProjectState] = useState<ProjectState | null>(null);
+    67→  const [candidate, setCandidate] = useState<CandidateState | null>(null);
+    68→  const [history, setHistory] = useState<HistoryItem[]>([]);
+    69→  const [sending, setSending] = useState(false);
+    70→  const [selectedId, setSelectedId] = useState<string | null>(null);
+    71→  const [viewMode, setViewMode] = useState<ViewMode>("iso");
+    72→  const [tab, setTab] = useState<DockTab>("copiloto");
+    73→  const [providerModalOpen, setProviderModalOpen] = useState(false);
+    74→  const [bomOpen, setBomOpen] = useState(false);
+    75→  const [providerLabel, setProviderLabel] = useState("carregando…");
+    76→  const [activeVision, setActiveVision] = useState(true);
+    77→  const [pdfBusy, setPdfBusy] = useState(false);
+    78→  const importFileRef = useRef<HTMLInputElement>(null);
+    79→  const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
+    80→  const [isolatedGroup, setIsolatedGroup] = useState<string | null>(null);
+    81→  const [focusRequest, setFocusRequest] = useState<{ id: string; nonce: number } | null>(null);
+    82→  const [snapshotSignal, setSnapshotSignal] = useState(0);
+    83→  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+    84→  const [showDimensions, setShowDimensions] = useState(true);
+    85→  const [measureMode, setMeasureMode] = useState(false);
+    86→  const [measureResult, setMeasureResult] = useState<{ distance: number } | null>(null);
+    87→  const [comparingRev, setComparingRev] = useState<number | null>(null);
+    88→  const [restoreInfo, setRestoreInfo] = useState<number | null>(null);
+    89→  const [compareMode, setCompareMode] = useState<"ghost" | "split">("ghost");
+    90→  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+    91→  const [dockWidth, setDockWidth] = useState(DOCK_DEFAULT);
+    92→  const dockDragRef = useRef<{ startX: number; startW: number } | null>(null);
+    93→  const dockWidthRef = useRef(dockWidth);
+    94→
+    95→  // arraste da alça de redimensionamento do dock (desktop)
+    96→  useEffect(() => {
+    97→    const onMove = (e: MouseEvent) => {
+    98→      const drag = dockDragRef.current;
+    99→      if (!drag) return;
+   100→      const maxW = Math.min(DOCK_MAX, Math.max(DOCK_MIN, Math.floor(window.innerWidth * 0.6)));
+   101→      const w = Math.min(maxW, Math.max(DOCK_MIN, drag.startW + (drag.startX - e.clientX)));
+   102→      dockWidthRef.current = w; // sync imediato — efeito passivo pode atrasar em headless
+   103→      setDockWidth(w);
+   104→    };
+   105→    const onUp = () => {
+   106→      if (!dockDragRef.current) return;
+   107→      dockDragRef.current = null;
+   108→      document.body.style.cursor = "";
+   109→      document.body.style.userSelect = "";
+   110→      try { localStorage.setItem(DOCK_WIDTH_KEY, String(dockWidthRef.current)); } catch { /* ignore */ }
+   111→    };
+   112→    window.addEventListener("mousemove", onMove);
+   113→    window.addEventListener("mouseup", onUp);
+   114→    return () => {
+   115→      window.removeEventListener("mousemove", onMove);
+   116→      window.removeEventListener("mouseup", onUp);
+   117→    };
+   118→  }, []);
+   119→
+   120→  const pushHistory = useCallback((item: Omit<HistoryItem, "id" | "ts">) => {
+   121→    setHistory((h) => [
+   122→      ...h.slice(-59),
+   123→      { ...item, id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ts: new Date().toISOString() },
+   124→    ]);
+   125→  }, []);
+   126→
+   127→  // restaura histórico do localStorage
+   128→  useEffect(() => {
+   129→    try {
+   130→      const raw = localStorage.getItem(HISTORY_KEY);
+   131→      if (raw) setHistory(JSON.parse(raw) as HistoryItem[]);
+   132→      const w = localStorage.getItem(DOCK_WIDTH_KEY);
+   133→      if (w) {
+   134→        const n = Number.parseInt(w, 10);
+   135→        if (Number.isFinite(n) && n >= DOCK_MIN && n <= DOCK_MAX) setDockWidth(n);
+   136→      }
+   137→    } catch {
+   138→      // ignora storage corrompido
+   139→    }
+   140→  }, []);
+   141→
+   142→  const refresh = useCallback(async () => {
+   143→    try {
+   144→      const st = await api.getProject();
+   145→      setProjectState(st);
+   146→    } catch (e) {
+   147→      toast.error((e as ApiCallError).message);
+   148→    }
+   149→  }, []);
+   150→
+   151→  useEffect(() => {
+   152→    void refresh();
+   153→    void api
+   154→      .meta()
+   155→      .then((m) => {
+   156→        const active = m.providers.find((p) => p.active) ?? m.providers[0];
+   157→        setProviderLabel(`${active?.label ?? "mock"} · ${active?.current_model ?? ""}`);
+   158→        setActiveVision(active?.supports_image ?? true);
+   159→      })
+   160→      .catch(() => setProviderLabel("mock · mock-transformer-v1"));
+   161→  }, [refresh]);
+   162→
+   163→  // ref síncrono do restoreInfo para uso no handler de teclado (evita stale closure)
+   164→  const restoreInfoRef = useRef<number | null>(null);
+   165→  useEffect(() => {
+   166→    restoreInfoRef.current = restoreInfo;
+   167→    if (restoreInfo === null) setCompareMode("ghost");
+   168→  }, [restoreInfo]);
+   169→
+   170→  // Ctrl+Z → undo atômico; 1–7 → vistas; Esc → desselecionar; B → alterna ghost/A/B
+   171→  useEffect(() => {
+   172→    const onKey = (e: KeyboardEvent) => {
+   173→      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+   174→        e.preventDefault();
+   175→        void doUndo();
+   176→        return;
+   177→      }
+   178→      if (e.key === "Escape") {
+   179→        setSelectedId(null);
+   180→        setMeasureMode(false);
+   181→        setMeasureResult(null);
+   182→        // Esc na comparação A/B volta para o modo ghost (2º Esc limpa o preview)
+   183→        setCompareMode((m) => (m === "split" && restoreInfoRef.current !== null ? "ghost" : m));
+   184→        return;
+   185→      }
+   186→      const target = e.target as HTMLElement | null;
+   187→      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+   188→      if (e.key.toLowerCase() === "b" && restoreInfoRef.current !== null) {
+   189→        setCompareMode((m) => (m === "ghost" ? "split" : "ghost"));
+   190→        return;
+   191→      }
+   192→      const viewKeys = ["1", "2", "3", "4", "5", "6", "7"];
+   193→      const idx = viewKeys.indexOf(e.key);
+   194→      if (idx >= 0) setViewMode(VIEWS[idx]);
+   195→      if (e.key.toLowerCase() === "d") setShowDimensions((v) => !v);
+   196→      if (e.key.toLowerCase() === "m") setMeasureMode((v) => !v);
+   197→    };
+   198→    window.addEventListener("keydown", onKey);
+   199→    return () => window.removeEventListener("keydown", onKey);
+   200→  }, []);
+   201→
+   202→  const doUndo = useCallback(async () => {
+   203→    try {
+   204→      const st = await api.undo();
+   205→      setProjectState(st);
+   206→      setCandidate(null);
+   207→      setRestoreInfo(null);
+   208→      setHistoryRefreshKey((k) => k + 1);
+   209→      pushHistory({ role: "info", text: st.message ?? "desfeito" });
+   210→      toast.success("Desfeito — JSON anterior restaurado");
+   211→    } catch (e) {
+   212→      const err = e as ApiCallError;
+   213→      if (err.payload?.type === "nothing_to_undo") toast.info("Nada para desfazer");
+   214→      else toast.error(err.payload?.message ?? err.message);
+   215→    }
+   216→  }, [pushHistory]);
+   217→
+   218→  // ---------- transform via IA ----------
+   219→  const sendRequest = useCallback(
+   220→    async (text: string, attachments: Array<{ type: "image"; name: string; data_url: string }>) => {
+   221→      if (!projectState) return;
+   222→      pushHistory({ role: "user", text });
+   223→      setSending(true);
+   224→      setCandidate(null);
+   225→      try {
+   226→        const r: TransformResult = await api.transform({
+   227→          request: text,
+   228→          base_revision: projectState.revision,
+   229→          base_hash: projectState.hash,
+   230→          attachments,
+   231→        });
+   232→        if (r.status === "ready" && r.candidate_project) {
+   233→          setCandidate({
+   234→            project: r.candidate_project,
+   235→            diff: (r.diff ?? { added: [], removed: [], modified: [], counts: { added: 0, removed: 0, modified: 0, total: 0 }, panel_changed: false, info_changed: false }),
+   236→            diffSummary: r.diff_summary ?? "",
+   237→            baseRevision: r.base_revision,
+   238→            baseHash: r.base_hash,
+   239→            hash: r.candidate_hash,
+   240→          });
+   241→          pushHistory({
+   242→            role: "assistant",
+   243→            text: r.explain,
+   244→            meta: {
+   245→              status: "ready",
+   246→              explain: r.explain,
+   247→              assumptions: r.assumptions,
+   248→              questions: r.questions,
+   249→              diffSummary: r.diff_summary,
+   250→              provider: r.meta.provider,
+   251→              model: r.meta.model,
+   252→              latency: r.meta.latency_ms,
+   253→              fewShot: r.meta.few_shot_id ?? null,
+   254→              fewShotScore: r.meta.few_shot_score ?? null,
+   255→              candidate: r.candidate_project,
+   256→            },
+   257→          });
+   258→        } else {
+   259→          pushHistory({
+   260→            role: "assistant",
+   261→            text: r.explain,
+   262→            meta: {
+   263→              status: "needs_input",
+   264→              explain: r.explain,
+   265→              questions: r.questions,
+   266→              assumptions: r.assumptions,
+   267→              provider: r.meta.provider,
+   268→              model: r.meta.model,
+   269→              latency: r.meta.latency_ms,
+   270→              fewShot: r.meta.few_shot_id ?? null,
+   271→              fewShotScore: r.meta.few_shot_score ?? null,
+   272→            },
+   273→          });
+   274→        }
+   275→      } catch (e) {
+   276→        const err = e as ApiCallError;
+   277→        const payload = err.payload;
+   278→        pushHistory({
+   279→          role: "error",
+   280→          text: ERRORS_FRIENDLY[payload?.type ?? ""] ?? payload?.message ?? err.message,
+   281→          meta: { errorType: payload?.type ?? "error" },
+   282→        });
+   283→      } finally {
+   284→        setSending(false);
+   285→      }
+   286→    },
+   287→    [projectState, pushHistory],
+   288→  );
+   289→
+   290→  // ---------- preview de candidato (JSON tab / validação) ----------
+   291→  const previewCandidate = useCallback(
+   292→    async (doc: ProjectDocument): Promise<PreviewResult> => {
+   293→      try {
+   294→        const r = await api.preview(doc);
+   295→        if (r.ok && r.diff && projectState) {
+   296→          setCandidate({
+   297→            project: doc,
+   298→            diff: r.diff,
+   299→            diffSummary: r.diff_summary ?? "",
+   300→            baseRevision: r.base_revision ?? projectState.revision,
+   301→            baseHash: r.base_hash ?? projectState.hash,
+   302→            hash: r.candidate_hash ?? "",
+   303→          });
+   304→          pushHistory({ role: "info", text: `JSON validado — ${r.diff_summary}. Revise o preview 3D e aplique.` });
+   305→        }
+   306→        return r;
+   307→      } catch (e) {
+   308→        const err = e as ApiCallError;
+   309→        toast.error(err.payload?.message ?? err.message);
+   310→        return { ok: false, errors: [{ path: "preview", message: err.message }] };
+   311→      }
+   312→    },
+   313→    [projectState, pushHistory],
+   314→  );
+   315→
+   316→  const applyCandidate = useCallback(async () => {
+   317→    if (!candidate) return;
+   318→    try {
+   319→      // restauração de revisão usa a rota dedicada (source "restore" no log)
+   320→      const st = restoreInfo !== null
+   321→        ? await api.restoreRevision(restoreInfo)
+   322→        : await api.apply({
+   323→            candidate: candidate.project,
+   324→            base_revision: candidate.baseRevision,
+   325→            base_hash: candidate.baseHash,
+   326→          });
+   327→      setProjectState(st);
+   328→      setCandidate(null);
+   329→      setRestoreInfo(null);
+   330→      setHistoryRefreshKey((k) => k + 1);
+   331→      setHistory((h) =>
+   332→        h.map((item) =>
+   333→          item.role === "assistant" && item.meta?.candidate && !item.meta.applied
+   334→            ? { ...item, meta: { ...item.meta, applied: true } }
+   335→            : item,
+   336→        ),
+   337→      );
+   338→      pushHistory({
+   339→        role: "info",
+   340→        text: restoreInfo !== null
+   341→          ? `Revisão ${restoreInfo} restaurada como revision ${st.revision}.`
+   342→          : `Candidato aplicado — revision ${st.revision}.`,
+   343→      });
+   344→      toast.success(restoreInfo !== null ? `Revisão ${restoreInfo} restaurada — rev ${st.revision}` : `Aplicado — revision ${st.revision}`);
+   345→    } catch (e) {
+   346→      const err = e as ApiCallError;
+   347→      if (err.status === 409) {
+   348→        toast.error("O projeto mudou desde o preview — regenere o candidato.");
+   349→        setCandidate(null);
+   350→        setRestoreInfo(null);
+   351→        void refresh();
+   352→      } else {
+   353→        toast.error(err.payload?.message ?? err.message);
+   354→      }
+   355→    }
+   356→  }, [candidate, restoreInfo, pushHistory, refresh]);
+   357→
+   358→  // ---------- comparação com revisão do histórico ----------
+   359→  const compareRevision = useCallback(async (rev: number) => {
+   360→    if (!projectState) return;
+   361→    setComparingRev(rev);
+   362→    setRestoreInfo(null);
+   363→    try {
+   364→      const entry = await api.getRevisionDoc(rev);
+   365→      const r = await api.preview(entry.project);
+   366→      if (r.ok && r.diff && r.base_revision != null && r.base_hash != null) {
+   367→        setCandidate({
+   368→          project: entry.project,
+   369→          diff: r.diff,
+   370→          diffSummary: r.diff_summary ?? "",
+   371→          baseRevision: r.base_revision,
+   372→          baseHash: r.base_hash,
+   373→          hash: r.candidate_hash ?? "",
+   374→        });
+   375→        setRestoreInfo(rev);
+   376→        pushHistory({
+   377→          role: "info",
+   378→          text: `Comparando rev ${rev} com a atual — ${r.diff_summary}. APLICAR restaura a rev ${rev}; CANCELAR descarta.`,
+   379→        });
+   380→      } else if (!r.ok) {
+   381→        toast.error("Documento da revisão falhou na validação atual.");
+   382→      }
+   383→    } catch (e) {
+   384→      toast.error((e as ApiCallError).payload?.message ?? (e as ApiCallError).message);
+   385→    } finally {
+   386→      setComparingRev(null);
+   387→    }
+   388→  }, [projectState, pushHistory]);
+   389→
+   390→  const cancelCandidate = useCallback(() => {
+   391→    setCandidate(null);
+   392→    setRestoreInfo(null);
+   393→    pushHistory({ role: "info", text: "Preview cancelado — documento atual preservado." });
+   394→  }, [pushHistory]);
+   395→
+   396→  // ---------- status maps para o viewer ----------
+   397→  const { statuses, candidateStatuses } = useMemo((): { statuses: StatusMap; candidateStatuses: StatusMap } => {
+   398→    if (!projectState) return { statuses: {}, candidateStatuses: {} };
+   399→    if (!candidate) return { statuses: {}, candidateStatuses: {} };
+   400→    const oldIds = new Set(projectState.project.elements.map((e) => e.id));
+   401→    const newIds = new Set(candidate.project.elements.map((e) => e.id));
+   402→    const modified = new Set(candidate.diff.modified);
+   403→    const added = new Set(candidate.diff.added);
+   404→    const removed = new Set(candidate.diff.removed);
+   405→    const sOld: StatusMap = {};
+   406→    for (const id of oldIds) {
+   407→      sOld[id] = removed.has(id) ? "removed" : modified.has(id) ? "modified" : "unchanged";
+   408→    }
+   409→    const sNew: StatusMap = {};
+   410→    for (const id of newIds) {
+   411→      sNew[id] = added.has(id) ? "added" : modified.has(id) ? "modified" : "unchanged";
+   412→    }
+   413→    return { statuses: sOld, candidateStatuses: sNew };
+   414→  }, [projectState, candidate]);
+   415→
+   416→  const selectedElement = useMemo(() => {
+   417→    const doc = candidate?.project ?? projectState?.project;
+   418→    return doc?.elements.find((e) => e.id === selectedId) ?? null;
+   419→  }, [projectState, candidate, selectedId]);
+   420→
+   421→  const weightInfo = useMemo(
+   422→    () => (selectedElement ? estimateElementWeightKg(selectedElement) : null),
+   423→    [selectedElement],
+   424→  );
+   425→
+   426→  const actions = {
+   427→    newProject: async () => {
+   428→      try {
+   429→        const st = await api.newProject();
+   430→        setProjectState(st);
+   431→        setCandidate(null);
+   432→        setRestoreInfo(null);
+   433→        setHistoryRefreshKey((k) => k + 1);
+   434→        pushHistory({ role: "info", text: "Novo projeto em branco criado." });
+   435→      } catch (e) {
+   436→        toast.error((e as ApiCallError).message);
+   437→      }
+   438→    },
+   439→    importJson: async (file: File) => {
+   440→      try {
+   441→        const text = await file.text();
+   442→        const doc = JSON.parse(text);
+   443→        const st = await api.importProject(doc);
+   444→        setProjectState(st);
+   445→        setCandidate(null);
+   446→        setRestoreInfo(null);
+   447→        setHistoryRefreshKey((k) => k + 1);
+   448→        pushHistory({ role: "info", text: "JSON importado e validado." });
+   449→        toast.success("Projeto importado");
+   450→      } catch (e) {
+   451→        toast.error((e as ApiCallError).payload?.message ?? (e as Error).message);
+   452→      }
+   453→    },
+   454→    exportPdf: async () => {
+   455→      setPdfBusy(true);
+   456→      try {
+   457→        await api.downloadPdf();
+   458→        toast.success("PDF gerado");
+   459→      } catch (e) {
+   460→        toast.error((e as ApiCallError).payload?.message ?? (e as Error).message);
+   461→      } finally {
+   462→        setPdfBusy(false);
+   463→      }
+   464→    },
+   465→  };
+   466→
+   467→  // persiste histórico (sem candidatos antigos pesados)
+   468→  useEffect(() => {
+   469→    try {
+   470→      const slim = history.slice(-30).map((h) => ({
+   471→        ...h,
+   472→        meta: h.meta?.candidate ? { ...h.meta, candidate: null } : h.meta,
+   473→      }));
+   474→      localStorage.setItem(HISTORY_KEY, JSON.stringify(slim));
+   475→    } catch {
+   476→      // quota — ignora
+   477→    }
+   478→  }, [history]);
+   479→
+   480→  const toggleHidden = useCallback((id: string) => {
+   481→    setHiddenIds((s) => {
+   482→      const n = new Set(s);
+   483→      if (n.has(id)) n.delete(id);
+   484→      else n.add(id);
+   485→      return n;
+   486→    });
+   487→  }, []);
+   488→
+   489→  const isolateGroup = useCallback((group: string | null) => {
+   490→    setIsolatedGroup(group);
+   491→    if (!projectState) return;
+   492→    const doc = candidate?.project ?? projectState.project;
+   493→    if (group === null) {
+   494→      setHiddenIds(new Set());
+   495→    } else {
+   496→      setHiddenIds(new Set(doc.elements.filter((e) => e.group !== group).map((e) => e.id)));
+   497→    }
+   498→  }, [projectState, candidate]);
+   499→
+   500→  const focusElement = useCallback((id: string) => {
+   501→    setSelectedId(id);
+   502→    setFocusRequest({ id, nonce: Date.now() });
+   503→  }, []);
+   504→
+   505→  const fitKey = `${projectState?.revision ?? 0}:${projectState?.hash?.slice(0, 8) ?? ""}:${candidate?.hash.slice(0, 8) ?? "none"}`;
+   506→  const project = projectState?.project;
+   507→  /** comparação A/B ativa (dois viewports) — só no fluxo de restauração de revisão */
+   508→  const splitActive = restoreInfo !== null && compareMode === "split" && candidate !== null;
+   509→
+   510→  return (
+   511→    <TooltipProvider>
+   512→      <div className="h-screen flex flex-col bg-slate-100 text-slate-900">
+   513→        {/* ---------- TOPBAR ---------- */}
+   514→        <header className="flex items-center gap-2 px-3 sm:px-4 h-14 bg-gradient-to-r from-[#141f2b] via-[#1b2836] to-[#223344] text-slate-100 shrink-0 border-b-4 border-orange-600 shadow-md" role="banner">
+   515→          <div className="flex items-center gap-2.5 min-w-0">
+   516→            <div className="h-8 w-8 rounded bg-orange-600 grid place-items-center font-black text-white text-sm shrink-0" aria-hidden>
+   517→              LC
+   518→            </div>
+   519→            <div className="leading-tight min-w-0">
+   520→              <div className="font-bold text-sm tracking-wide truncate">LED JSON CAD</div>
+   521→              <div className="text-[10px] text-slate-400 truncate">documento JSON · mm · Z solo</div>
+   522→            </div>
+   523→          </div>
+   524→
+   525→          {project && (
+   526→            <div className="hidden md:flex items-center gap-2 ml-4 min-w-0">
+   527→              <span className="text-sm font-medium truncate max-w-56" title={project.project.name}>
+   528→                {project.project.name}
+   529→              </span>
+   530→              <Badge variant="outline" className="text-slate-300 border-slate-500">
+   531→                rev {projectState!.revision}
+   532→              </Badge>
+   533→              <button
+   534→                onClick={() => {
+   535→                  const h = projectState!.hash;
+   536→                  if (navigator.clipboard?.writeText) {
+   537→                    navigator.clipboard.writeText(h).then(() => toast.success(`Hash ${h.slice(0, 8)} copiado`)).catch(() => toast.error("Não foi possível copiar"));
+   538→                  }
+   539→                }}
+   540→                title={`Copiar hash completo (${projectState!.hash})`}
+   541→                aria-label={`Copiar hash de revisão ${projectState!.hash}`}
+   542→                className="outline-none"
+   543→              >
+   544→                <Badge variant="outline" className="text-slate-400 border-slate-600 font-mono text-[10px] hover:text-white hover:border-slate-400 transition-colors cursor-pointer">
+   545→                  {projectState!.hash.slice(0, 8)}
+   546→                </Badge>
+   547→              </button>
+   548→              <Badge variant="outline" className="text-slate-400 border-slate-600">
+   549→                {project.elements.length} el.
+   550→              </Badge>
+   551→            </div>
+   552→          )}
+   553→
+   554→          <div className="ml-auto flex items-center gap-1.5">
+   555→            <input
+   556→              ref={importFileRef}
+   557→              type="file"
+   558→              accept=".json,application/json"
+   559→              hidden
+   560→              onChange={(e) => {
+   561→                const f = e.target.files?.[0];
+   562→                if (f) void actions.importJson(f);
+   563→                e.target.value = "";
+   564→              }}
+   565→            />
+   566→            <TopBtn icon={<FilePlus2 className="h-4 w-4" />} label="NOVO" onClick={() => void actions.newProject()} />
+   567→            <TopBtn icon={<Upload className="h-4 w-4" />} label="IMPORTAR" onClick={() => importFileRef.current?.click()} />
+   568→            <TopBtn icon={<Undo2 className="h-4 w-4" />} label="DESFAZER" onClick={() => void doUndo()} title="Ctrl+Z" />
+   569→            <TopBtn icon={<FileSpreadsheet className="h-4 w-4" />} label="BOM" onClick={() => setBomOpen(true)} />
+   570→            <TopBtn
+   571→              icon={pdfBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+   572→              label="PDF"
+   573→              onClick={() => void actions.exportPdf()}
+   574→              disabled={pdfBusy}
+   575→            />
+   576→            <TopBtn icon={<PlugZap className="h-4 w-4" />} label="IA" onClick={() => setProviderModalOpen(true)} highlight />
+   577→          </div>
+   578→        </header>
+   579→
+   580→        {/* ---------- MAIN ---------- */}
+   581→        <main className="flex-1 flex flex-col lg:flex-row min-h-0" role="main">
+   582→          {/* VIEWPORT */}
+   583→          <section className="relative flex-1 min-h-[45vh] lg:min-h-0 bg-slate-100" aria-label="Viewport 3D">
+   584→            {project ? (
+   585→              <div className={`absolute inset-0 ${splitActive ? "invisible" : ""}`} aria-hidden={splitActive}>
+   586→                <Viewer3DNoSSR
+   587→                project={project}
+   588→                candidate={candidate?.project ?? null}
+   589→                statuses={statuses}
+   590→                candidateStatuses={candidateStatuses}
+   591→                selectedId={selectedId}
+   592→                onSelect={setSelectedId}
+   593→                viewMode={viewMode}
+   594→                fitKey={fitKey}
+   595→                hiddenIds={hiddenIds}
+   596→                focusRequest={focusRequest}
+   597→                snapshotSignal={snapshotSignal}
+   598→                showDimensions={showDimensions}
+   599→                measureMode={measureMode}
+   600→                onMeasureResult={setMeasureResult}
+   601→                paused={splitActive}
+   602→                />
+   603→              </div>
+   604→            ) : (
+   605→              <div className="absolute inset-0 grid place-items-center text-slate-400">
+   606→                <Loader2 className="h-8 w-8 animate-spin" />
+   607→              </div>
+   608→            )}
+   609→
+   610→            {/* COMPARAÇÃO A/B — dois viewports sincronizados (restauração de revisão) */}
+   611→            {splitActive && project && candidate && (
+   612→              <CompareSplitNoSSR
+   613→                docA={project}
+   614→                revA={projectState!.revision}
+   615→                docB={candidate.project}
+   616→                revB={restoreInfo!}
+   617→                statusesA={statuses}
+   618→                statusesB={candidateStatuses}
+   619→                diffCounts={candidate.diff.counts}
+   620→                onClose={() => setCompareMode("ghost")}
+   621→              />
+   622→            )}
+   623→
+   624→            {/* vistas — linha única com scroll em telas pequenas + atalhos (ocultas na comparação A/B) */}
+   625→            {!splitActive && (
+   626→            <div className="absolute top-2.5 left-1/2 -translate-x-1/2 max-w-[95%] flex items-center gap-1" role="toolbar" aria-label="Vistas da câmera">
+   627→              <div className="relative flex items-center min-w-0 max-w-full">
+   628→                <div className="flex items-center gap-0.5 bg-white/90 backdrop-blur rounded-full px-1.5 py-1 shadow-md border border-slate-200 overflow-x-auto cad-scroll max-w-full">
+   629→                  {VIEWS.map((v, i) => (
+   630→                    <button
+   631→                      key={v}
+   632→                      onClick={() => setViewMode(v)}
+   633→                      title={`${VIEW_LABELS[v]} (${i + 1})`}
+   634→                      className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap transition-colors ${
+   635→                        viewMode === v ? "bg-orange-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-200"
+   636→                      }`}
+   637→                      aria-pressed={viewMode === v}
+   638→                    >
+   639→                      {VIEW_LABELS[v]}
+   640→                    </button>
+   641→                  ))}
+   642→                </div>
+   643→                {/* fade que indica scroll horizontal */}
+   644→                <div className="pointer-events-none absolute inset-y-0 right-0 w-7 rounded-r-full bg-gradient-to-l from-white/95 via-white/60 to-transparent" aria-hidden />
+   645→              </div>
+   646→              <button
+   647→                onClick={() => setSnapshotSignal((n) => n + 1)}
+   648→                title="Exportar PNG do viewport"
+   649→                aria-label="Exportar PNG do viewport"
+   650→                className="h-8 w-8 grid place-items-center rounded-full bg-white/90 backdrop-blur shadow-md border border-slate-200 text-slate-600 hover:text-orange-600 hover:border-orange-300 transition-colors shrink-0"
+   651→              >
+   652→                <Camera className="h-4 w-4" />
+   653→              </button>
+   654→              <button
+   655→                onClick={() => {
+   656→                  setShowDimensions((v) => !v);
+   657→                  setShortcutsOpen(false);
+   658→                }}
+   659→                title={`Cotas L/H/P (D) — ${showDimensions ? "ativas" : "desativadas"}`}
+   660→                aria-label="Alternar cotas de dimensões"
+   661→                aria-pressed={showDimensions}
+   662→                className={`h-8 w-8 grid place-items-center rounded-full shadow-md border transition-colors shrink-0 ${
+   663→                  showDimensions ? "bg-orange-600 border-orange-600 text-white" : "bg-white/90 border-slate-200 text-slate-600 hover:text-orange-600 hover:border-orange-300"
+   664→                }`}
+   665→              >
+   666→                <Ruler className="h-4 w-4" />
+   667→              </button>
+   668→              <button
+   669→                onClick={() => {
+   670→                  setMeasureMode((v) => !v);
+   671→                  setMeasureResult(null);
+   672→                  setShortcutsOpen(false);
+   673→                }}
+   674→                title={`Medir distância entre dois pontos (M) — ${measureMode ? "ativo" : "inativo"}`}
+   675→                aria-label="Alternar ferramenta de medição"
+   676→                aria-pressed={measureMode}
+   677→                className={`h-8 w-8 grid place-items-center rounded-full shadow-md border transition-colors shrink-0 ${
+   678→                  measureMode ? "bg-orange-600 border-orange-600 text-white" : "bg-white/90 border-slate-200 text-slate-600 hover:text-orange-600 hover:border-orange-300"
+   679→                }`}
+   680→              >
+   681→                <Crosshair className="h-4 w-4" />
+   682→              </button>
+   683→              <button
+   684→                onClick={() => setShortcutsOpen((o) => !o)}
+   685→                title="Atalhos de teclado"
+   686→                aria-label="Atalhos de teclado"
+   687→                className={`h-8 w-8 grid place-items-center rounded-full shadow-md border transition-colors shrink-0 ${
+   688→                  shortcutsOpen ? "bg-orange-600 border-orange-600 text-white" : "bg-white/90 border-slate-200 text-slate-600 hover:text-orange-600 hover:border-orange-300"
+   689→                }`}
+   690→              >
+   691→                <Keyboard className="h-4 w-4" />
+   692→              </button>
+   693→            </div>
+   694→            )}
+   695→
+   696→            {/* popover de atalhos */}
+   697→            <AnimatePresence>
+   698→              {shortcutsOpen && !splitActive && (
+   699→                <motion.div
+   700→                  initial={{ opacity: 0, y: -6, scale: 0.97 }}
+   701→                  animate={{ opacity: 1, y: 0, scale: 1 }}
+   702→                  exit={{ opacity: 0, y: -6, scale: 0.97 }}
+   703→                  transition={{ duration: 0.15 }}
+   704→                  className="absolute top-12 right-3 w-64 bg-white/95 backdrop-blur border border-slate-200 shadow-xl rounded-xl p-3 z-10"
+   705→                  role="dialog"
+   706→                  aria-label="Atalhos de teclado"
+   707→                >
+   708→                  <div className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+   709→                    <Keyboard className="h-3.5 w-3.5 text-orange-600" /> ATALHOS
+   710→                  </div>
+   711→                  <ul className="text-[11px] text-slate-600 space-y-1.5">
+   712→                    {[...Array(7)].map((_, i) => (
+   713→                      <li key={i} className="flex items-center justify-between">
+   714→                        <span>{VIEW_LABELS[VIEWS[i]]}</span>
+   715→                        <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">{i + 1}</kbd>
+   716→                      </li>
+   717→                    ))}
+   718→                    <li className="flex items-center justify-between">
+   719→                      <span>Desfazer</span>
+   720→                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Ctrl+Z</kbd>
+   721→                    </li>
+   722→                    <li className="flex items-center justify-between">
+   723→                      <span>Cotas L/H/P</span>
+   724→                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">D</kbd>
+   725→                    </li>
+   726→                    <li className="flex items-center justify-between">
+   727→                      <span>Medir distância</span>
+   728→                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">M</kbd>
+   729→                    </li>
+   730→                    <li className="flex items-center justify-between">
+   731→                      <span>Alternar comparação A/B</span>
+   732→                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">B</kbd>
+   733→                    </li>
+   734→                    <li className="flex items-center justify-between">
+   735→                      <span>Desselecionar / sair do modo</span>
+   736→                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Esc</kbd>
+   737→                    </li>
+   738→                    <li className="flex items-center justify-between">
+   739→                      <span>Enviar pedido</span>
+   740→                      <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Enter</kbd>
+   741→                    </li>
+   742→                  </ul>
+   743→                </motion.div>
+   744→              )}
+   745→            </AnimatePresence>
+   746→
+   747→            {/* badge do modo medição */}
+   748→            {measureMode && !splitActive && (
+   749→              <motion.div
+   750→                initial={{ opacity: 0, y: -6 }}
+   751→                animate={{ opacity: 1, y: 0 }}
+   752→                className="absolute top-12 right-3 flex items-center gap-2 bg-white/95 backdrop-blur border border-orange-300 shadow-lg rounded-lg px-3 py-1.5 text-[11px] z-10"
+   753→                role="status"
+   754→              >
+   755→                <Crosshair className="h-3.5 w-3.5 text-orange-600" />
+   756→                {measureResult ? (
+   757→                  <span className="font-bold text-orange-700 flex items-center gap-1.5">
+   758→                    <MoveHorizontal className="h-3.5 w-3.5" />
+   759→                    {Math.round(measureResult.distance)} mm
+   760→                    <span className="text-slate-400 font-normal">({(measureResult.distance / 1000).toFixed(3)} m)</span>
+   761→                  </span>
+   762→                ) : (
+   763→                  <span className="text-slate-600">clique em 2 pontos do modelo para medir · Esc sai</span>
+   764→                )}
+   765→              </motion.div>
+   766→            )}
+   767→
+   768→            {/* badge grupo isolado */}
+   769→            {isolatedGroup && !splitActive && (
+   770→              <motion.button
+   771→                initial={{ opacity: 0, scale: 0.9 }}
+   772→                animate={{ opacity: 1, scale: 1 }}
+   773→                onClick={() => isolateGroup(null)}
+   774→                className="absolute top-12 left-3 flex items-center gap-1.5 bg-orange-600 text-white text-[11px] font-bold px-2.5 py-1 rounded-full shadow-lg"
+   775→                title="remover isolamento"
+   776→              >
+   777→                <Layers3 className="h-3 w-3" /> ISOLADO: {isolatedGroup} ×
+   778→              </motion.button>
+   779→            )}
+   780→
+   781→            {/* info do elemento selecionado */}
+   782→            <AnimatePresence>
+   783→              {selectedElement && !splitActive && (
+   784→                <motion.div
+   785→                  initial={{ opacity: 0, x: -12 }}
+   786→                  animate={{ opacity: 1, x: 0 }}
+   787→                  exit={{ opacity: 0, x: -12 }}
+   788→                  transition={{ duration: 0.16 }}
+   789→                  className="absolute top-2.5 left-2.5 bg-white/95 backdrop-blur border border-slate-200 shadow-lg rounded-xl p-3 text-xs max-w-64"
+   790→                  role="status"
+   791→                >
+   792→                  <div className="flex items-center justify-between mb-1.5">
+   793→                    <span className="font-bold text-orange-700">{selectedElement.id}</span>
+   794→                    <button onClick={() => setSelectedId(null)} aria-label="Fechar info do elemento" className="text-slate-400 hover:text-slate-700">
+   795→                      <X className="h-3.5 w-3.5" />
+   796→                    </button>
+   797→                  </div>
+   798→                  <div className="grid grid-cols-[64px_1fr] gap-x-2 gap-y-0.5 text-slate-600">
+   799→                    <span className="text-slate-400">tipo</span><span>{selectedElement.type}</span>
+   800→                    <span className="text-slate-400">role</span><span>{selectedElement.role}</span>
+   801→                    <span className="text-slate-400">grupo</span><span className="truncate">{selectedElement.group}</span>
+   802→                    {selectedElement.type === "beam" && (
+   803→                      <>
+   804→                        <span className="text-slate-400">perfil</span><span>{selectedElement.profile}</span>
+   805→                        <span className="text-slate-400">start</span><span className="font-mono text-[10px]">{fmtV(selectedElement.start)}</span>
+   806→                        <span className="text-slate-400">end</span><span className="font-mono text-[10px]">{fmtV(selectedElement.end)}</span>
+   807→                      </>
+   808→                    )}
+   809→                    {selectedElement.type === "plate" && (
+   810→                      <><span className="text-slate-400">size</span><span className="font-mono text-[10px]">{selectedElement.size_x}×{selectedElement.size_y}×{selectedElement.size_z}</span></>
+   811→                    )}
+   812→                    {selectedElement.type === "cable" && (
+   813→                      <><span className="text-slate-400">Ø</span><span>{selectedElement.diameter} mm</span></>
+   814→                    )}
+   815→                    {weightInfo && (
+   816→                      <>
+   817→                        <span className="text-slate-400 flex items-center gap-1"><Weight className="h-3 w-3" /> peso</span>
+   818→                        <span className="font-semibold text-slate-700">≈ {weightInfo < 10 ? weightInfo.toFixed(2) : weightInfo.toFixed(1)} kg</span>
+   819→                      </>
+   820→                    )}
+   821→                  </div>
+   822→                </motion.div>
+   823→              )}
+   824→            </AnimatePresence>
+   825→
+   826→            {/* legenda de diff → inspector detalhado ao clicar (só no modo ghost) */}
+   827→            {candidate && !splitActive && (
+   828→              <DiffInspector
+   829→                diff={candidate.diff}
+   830→                onPick={(id) => focusElement(id)}
+   831→              />
+   832→            )}
+   833→
+   834→            {/* PREVIEW BAR */}
+   835→            <AnimatePresence>
+   836→              {candidate && (
+   837→                <motion.div
+   838→                  initial={{ opacity: 0, y: 24 }}
+   839→                  animate={{ opacity: 1, y: 0 }}
+   840→                  exit={{ opacity: 0, y: 24 }}
+   841→                  transition={{ type: "spring", stiffness: 320, damping: 28 }}
+   842→                  className="absolute bottom-3 left-1/2 -translate-x-1/2 w-[min(680px,92%)] bg-[#1b2836]/95 backdrop-blur text-white rounded-xl shadow-2xl border border-orange-500/60 px-4 py-2.5 flex flex-col sm:flex-row items-center gap-2 z-20"
+   843→                  role="alertdialog"
+   844→                  aria-label="Preview de alterações propostas"
+   845→                >
+   846→                  <div className="text-sm flex-1 min-w-0">
+   847→                    {restoreInfo !== null ? (
+   848→                      <span className="font-bold text-amber-300 flex items-center gap-1.5 flex-wrap">
+   849→                        <GitCompare className="h-4 w-4" /> COMPARAÇÃO COM REV {restoreInfo}
+   850→                      </span>
+   851→                    ) : (
+   852→                      <span className="font-bold text-orange-400">{candidate.diff.counts.total} alterações propostas</span>
+   853→                    )}
+   854→                    <span className="text-slate-300 text-xs ml-2 hidden sm:inline truncate">
+   855→                      {candidate.diff.counts.added} novas · {candidate.diff.counts.modified} editadas · {candidate.diff.counts.removed} removidas
+   856→                      {candidate.diff.panel_changed ? " · painel alterado" : ""}
+   857→                    </span>
+   858→                  </div>
+   859→                  <div className="flex gap-2 items-center flex-wrap justify-center sm:justify-end">
+   860→                    {/* alternador de modo de comparação (só no fluxo de restauração) */}
+   861→                    {restoreInfo !== null && (
+   862→                      <div
+   863→                        className="flex rounded-lg overflow-hidden border border-slate-500/70 shrink-0"
+   864→                        role="radiogroup"
+   865→                        aria-label="Modo de comparação visual"
+   866→                      >
+   867→                        <button
+   868→                          role="radio"
+   869→                          aria-checked={compareMode === "ghost"}
+   870→                          onClick={() => setCompareMode("ghost")}
+   871→                          title="Diff por transparência no viewport atual (B alterna)"
+   872→                          className={`px-2.5 py-1.5 text-[10px] font-bold tracking-wide transition-colors ${
+   873→                            compareMode === "ghost" ? "bg-slate-200 text-slate-900" : "text-slate-300 hover:bg-slate-700"
+   874→                          }`}
+   875→                        >
+   876→                          GHOST
+   877→                        </button>
+   878→                        <button
+   879→                          role="radio"
+   880→                          aria-checked={compareMode === "split"}
+   881→                          onClick={() => setCompareMode("split")}
+   882→                          title="Dois viewports lado a lado com órbita sincronizada (B alterna)"
+   883→                          className={`px-2.5 py-1.5 text-[10px] font-bold tracking-wide transition-colors flex items-center gap-1 ${
+   884→                            compareMode === "split" ? "bg-orange-600 text-white" : "text-slate-300 hover:bg-slate-700"
+   885→                          }`}
+   886→                        >
+   887→                          <Columns2 className="h-3 w-3" /> A/B
+   888→                        </button>
+   889→                      </div>
+   890→                    )}
+   891→                    <Button size="sm" onClick={() => void applyCandidate()} className={restoreInfo !== null ? "bg-amber-500 hover:bg-amber-600 text-white font-bold px-5 shadow-lg shadow-amber-900/40" : "bg-green-600 hover:bg-green-700 text-white font-bold px-5 shadow-lg shadow-green-900/40"}>
+   892→                      {restoreInfo !== null ? `RESTAURAR REV ${restoreInfo}` : "APLICAR"}
+   893→                    </Button>
+   894→                    <Button
+   895→                      size="sm"
+   896→                      variant="outline"
+   897→                      onClick={cancelCandidate}
+   898→                      className="border-slate-500 text-slate-200 hover:bg-slate-700"
+   899→                    >
+   900→                      CANCELAR
+   901→                    </Button>
+   902→                  </div>
+   903→                </motion.div>
+   904→              )}
+   905→            </AnimatePresence>
+   906→          </section>
+   907→
+   908→          {/* DOCK (redimensionável em lg+) */}
+   909→          <div
+   910→            className="relative h-[46vh] lg:h-auto min-h-0 shrink-0 w-full lg:w-[var(--dock-w)]"
+   911→            style={{ "--dock-w": `${dockWidth}px` } as React.CSSProperties}
+   912→            data-dock-wrap
+   913→          >
+   914→            {/* alça de redimensionamento (desktop) */}
+   915→            <div
+   916→              role="separator"
+   917→              aria-orientation="vertical"
+   918→              aria-label="Redimensionar painel lateral"
+   919→              aria-valuenow={dockWidth}
+   920→              aria-valuemin={DOCK_MIN}
+   921→              aria-valuemax={DOCK_MAX}
+   922→              tabIndex={0}
+   923→              onMouseDown={(e) => {
+   924→                dockDragRef.current = { startX: e.clientX, startW: dockWidth };
+   925→                document.body.style.cursor = "col-resize";
+   926→                document.body.style.userSelect = "none";
+   927→                e.preventDefault();
+   928→              }}
+   929→              onKeyDown={(e) => {
+   930→                const bump = (delta: number) => {
+   931→                  const w = Math.min(DOCK_MAX, Math.max(DOCK_MIN, dockWidthRef.current + delta));
+   932→                  dockWidthRef.current = w;
+   933→                  setDockWidth(w);
+   934→                  try { localStorage.setItem(DOCK_WIDTH_KEY, String(w)); } catch { /* ignore */ }
+   935→                };
+   936→                if (e.key === "ArrowLeft") {
+   937→                  e.preventDefault();
+   938→                  bump(24);
+   939→                } else if (e.key === "ArrowRight") {
+   940→                  e.preventDefault();
+   941→                  bump(-24);
+   942→                } else if (e.key === "Home") {
+   943→                  e.preventDefault();
+   944→                  dockWidthRef.current = DOCK_DEFAULT;
+   945→                  setDockWidth(DOCK_DEFAULT);
+   946→                  try { localStorage.setItem(DOCK_WIDTH_KEY, String(DOCK_DEFAULT)); } catch { /* ignore */ }
+   947→                }
+   948→              }}
+   949→              onDoubleClick={() => {
+   950→                setDockWidth(DOCK_DEFAULT);
+   951→                try { localStorage.setItem(DOCK_WIDTH_KEY, String(DOCK_DEFAULT)); } catch { /* ignore */ }
+   952→              }}
+   953→              className="hidden lg:block absolute top-0 left-0 h-full w-1.5 -ml-0.5 cursor-col-resize z-20 group"
+   954→              title="Arraste para redimensionar · duplo clique restaura · ←/→ ajusta"
+   955→            >
+   956→              <div className="h-full w-full rounded-full bg-slate-300/50 group-hover:bg-orange-500/60 group-focus-visible:bg-orange-500 transition-colors" />
+   957→            </div>
+   958→            <div className="h-full w-full" style={{ width: "100%" }} data-dock-inner>
+   959→              {project && (
+   960→                <CopilotDock
+   961→                  tab={tab}
+   962→                  onTabChange={setTab}
+   963→                  history={history}
+   964→                  sending={sending}
+   965→                  onSend={(t, a) => void sendRequest(t, a)}
+   966→                  project={project}
+   967→                  projectKey={`${projectState!.revision}:${projectState!.hash.slice(0, 8)}`}
+   968→                  onPreviewCandidate={previewCandidate}
+   969→                  selectedElement={selectedElement}
+   970→                  activeProviderLabel={providerLabel}
+   971→                  activeVision={activeVision}
+   972→                  onOpenProviders={() => setProviderModalOpen(true)}
+   973→                  onOpenJsonTab={() => setTab("json")}
+   974→                  onAppliedCandidate={() => void refresh()}
+   975→                  selectedId={selectedId}
+   976→                  onSelect={setSelectedId}
+   977→                  hiddenIds={hiddenIds}
+   978→                  onToggleHidden={toggleHidden}
+   979→                  onIsolateGroup={isolateGroup}
+   980→                  isolatedGroup={isolatedGroup}
+   981→                  onFocusElement={focusElement}
+   982→                  candidateDoc={candidate?.project ?? null}
+   983→                  comparingRev={comparingRev}
+   984→                  onCompareRevision={(rev) => void compareRevision(rev)}
+   985→                  historyRefreshKey={historyRefreshKey}
+   986→                  onRevisionRestored={() => void refresh()}
+   987→                />
+   988→              )}
+   989→            </div>
+   990→          </div>
+   991→        </main>
+   992→
+   993→        {/* ---------- FOOTER (status) ---------- */}
+   994→        <footer className="h-7 shrink-0 bg-[#141f2b] text-slate-400 text-[11px] flex items-center gap-3 px-3 overflow-hidden" role="contentinfo">
+   995→          <span className="text-orange-500 font-semibold shrink-0">LED Collor</span>
+   996→          <span className="hidden sm:inline truncate">JSON do projeto é a fonte de verdade · canvas é visualização · PDF/BOM derivados</span>
+   997→          <span className="ml-auto flex items-center gap-2 shrink-0">
+   998→            {candidate && <span className="text-orange-400 font-semibold">PREVIEW ATIVO</span>}
+   999→            {splitActive && <span className="text-amber-300 font-semibold hidden md:inline cad-pulse-soft">A/B rev {restoreInfo}</span>}
+  1000→            {isolatedGroup && <span className="text-amber-400 hidden md:inline">isolando {isolatedGroup}</span>}
+  1001→            <span className="hidden lg:inline">
+  1002→              {project?.elements.length ?? 0} el. · {new Set((project?.elements ?? []).map((e) => e.group)).size} grupos
+  1003→            </span>
+  1004→            <Lock className="h-3 w-3" aria-hidden />
+  1005→            <span>unidade: mm</span>
+  1006→            <span className="hidden md:inline font-mono">{projectState?.hash.slice(0, 8) ?? "—"}</span>
+  1007→            <button
+  1008→              onClick={() => {
+  1009→                void refresh();
+  1010→                void api
+  1011→                  .meta()
+  1012→                  .then((m) => {
+  1013→                    const active = m.providers.find((p) => p.active) ?? m.providers[0];
+  1014→                    setProviderLabel(`${active?.label ?? "mock"} · ${active?.current_model ?? ""}`);
+  1015→                  })
+  1016→                  .catch(() => undefined);
+  1017→              }}
+  1018→              title="Atualizar status"
+  1019→              className="hover:text-white"
+  1020→              aria-label="Atualizar status"
+  1021→            >
+  1022→              <RefreshCw className="h-3 w-3" />
+  1023→            </button>
+  1024→          </span>
+  1025→        </footer>
+  1026→
+  1027→        <ProviderModal
+  1028→          open={providerModalOpen}
+  1029→          onOpenChange={setProviderModalOpen}
+  1030→          onActivated={() => {
+  1031→            void api
+  1032→              .meta()
+  1033→              .then((m) => {
+  1034→                const active = m.providers.find((p) => p.active) ?? m.providers[0];
+  1035→                setProviderLabel(`${active?.label ?? "mock"} · ${active?.current_model ?? ""}`);
+  1036→              })
+  1037→              .catch(() => undefined);
+  1038→          }}
+  1039→        />
+  1040→        <BomDialog open={bomOpen} onOpenChange={setBomOpen} />
+  1041→      </div>
+  1042→    </TooltipProvider>
+  1043→  );
+  1044→}
+  1045→
+  1046→function TopBtn({
+  1047→  icon,
+  1048→  label,
+  1049→  onClick,
+  1050→  title,
+  1051→  disabled,
+  1052→  highlight,
+  1053→}: {
+  1054→  icon: React.ReactNode;
+  1055→  label: string;
+  1056→  onClick: () => void;
+  1057→  title?: string;
+  1058→  disabled?: boolean;
+  1059→  highlight?: boolean;
+  1060→}) {
+  1061→  return (
+  1062→    <Button
+  1063→      size="sm"
+  1064→      variant="ghost"
+  1065→      onClick={onClick}
+  1066→      disabled={disabled}
+  1067→      title={title ?? label}
+  1068→      className={`h-9 px-2 sm:px-2.5 text-[10px] sm:text-[11px] font-semibold gap-1 ${
+  1069→        highlight ? "text-orange-400 hover:text-orange-300 hover:bg-slate-700" : "text-slate-200 hover:text-white hover:bg-slate-700"
+  1070→      }`}
+  1071→    >
+  1072→      {icon}
+  1073→      <span className="hidden sm:inline">{label}</span>
+  1074→    </Button>
+  1075→  );
+  1076→}
+  1077→
+  1078→function Legend({ color, label }: { color: string; label: string }) {
+  1079→  return (
+  1080→    <div className="flex items-center gap-1.5 text-slate-600">
+  1081→      <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: color }} aria-hidden />
+  1082→      {label}
+  1083→    </div>
+  1084→  );
+  1085→}
+  1086→
+  1087→/**
+  1088→ * INSPECTOR DE DIFF — legenda clicável que expande a lista detalhada de elementos
+  1089→ * alterados (adicionadas/editadas/removidas). Clicar num ID enquadra o elemento no viewport.
+  1090→ */
+  1091→function DiffInspector({ diff, onPick }: { diff: ProjectDiff; onPick: (id: string) => void }) {
+  1092→  const [open, setOpen] = useState(false);
+  1093→  const sections: Array<{ key: "added" | "modified" | "removed"; color: string; label: string; ids: string[]; clickable: boolean }> = [
+  1094→    { key: "added", color: "#16a34a", label: "adicionadas", ids: diff.added, clickable: true },
+  1095→    { key: "modified", color: "#ea580c", label: "editadas", ids: diff.modified, clickable: true },
+  1096→    { key: "removed", color: "#dc2626", label: "removidas", ids: diff.removed, clickable: false },
+  1097→  ];
+  1098→  return (
+  1099→    <motion.div
+  1100→      initial={{ opacity: 0, y: 8 }}
+  1101→      animate={{ opacity: 1, y: 0 }}
+  1102→      className="absolute bottom-[108px] sm:bottom-[68px] left-2.5 max-w-72 bg-white/95 backdrop-blur border border-slate-200 rounded-xl shadow-md overflow-hidden z-10"
+  1103→    >
+  1104→      <button
+  1105→        onClick={() => setOpen((o) => !o)}
+  1106→        aria-expanded={open}
+  1107→        className="w-full flex items-center gap-2 px-3 py-2 text-[11px] hover:bg-slate-50 transition-colors"
+  1108→        title={open ? "Recolher detalhes do diff" : "Ver lista detalhada do diff"}
+  1109→      >
+  1110→        <span className="font-bold text-slate-700">DIFF</span>
+  1111→        <span className="flex items-center gap-2.5">
+  1112→          <Legend color="#16a34a" label={`+${diff.counts.added}`} />
+  1113→          <Legend color="#ea580c" label={`~${diff.counts.modified}`} />
+  1114→          <Legend color="#dc2626" label={`-${diff.counts.removed}`} />
+  1115→        </span>
+  1116→        {open ? <ChevronDown className="h-3.5 w-3.5 ml-auto text-slate-400" /> : <ChevronUp className="h-3.5 w-3.5 ml-auto text-slate-400" />}
+  1117→      </button>
+  1118→      <AnimatePresence>
+  1119→        {open && (
+  1120→          <motion.div
+  1121→            initial={{ height: 0, opacity: 0 }}
+  1122→            animate={{ height: "auto", opacity: 1 }}
+  1123→            exit={{ height: 0, opacity: 0 }}
+  1124→            transition={{ duration: 0.18 }}
+  1125→            className="border-t border-slate-200"
+  1126→          >
+  1127→            <div className="max-h-52 overflow-y-auto cad-scroll p-2.5 space-y-2">
+  1128→              {diff.counts.total === 0 && (
+  1129→                <p className="text-[11px] text-slate-500 px-0.5">Nenhuma alteração geométrica — apenas metadados.</p>
+  1130→              )}
+  1131→              {sections.map((s) =>
+  1132→                s.ids.length === 0 ? null : (
+  1133→                  <div key={s.key}>
+  1134→                    <div className="flex items-center gap-1.5 mb-1">
+  1135→                      <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: s.color }} aria-hidden />
+  1136→                      <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+  1137→                        {s.label} ({s.ids.length})
+  1138→                      </span>
+  1139→                      {!s.clickable && (
+  1140→                        <span className="text-[9.5px] text-slate-400 font-normal">· só no documento atual</span>
+  1141→                      )}
+  1142→                    </div>
+  1143→                    <div className="flex flex-wrap gap-1">
+  1144→                      {s.ids.slice(0, 40).map((id) =>
+  1145→                        s.clickable ? (
+  1146→                          <button
+  1147→                            key={id}
+  1148→                            onClick={() => onPick(id)}
+  1149→                            title={`Enquadrar ${id} no viewport`}
+  1150→                            className="px-1.5 py-0.5 rounded-md border font-mono text-[10px] transition-colors hover:text-white"
+  1151→                            style={{ borderColor: `${s.color}55`, color: s.color, backgroundColor: `${s.color}0d` }}
+  1152→                            onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = s.color)}
+  1153→                            onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = `${s.color}0d`)}
+  1154→                          >
+  1155→                            {id}
+  1156→                          </button>
+  1157→                        ) : (
+  1158→                          <span
+  1159→                            key={id}
+  1160→                            className="px-1.5 py-0.5 rounded-md border font-mono text-[10px] border-slate-300 text-slate-400 bg-slate-100 cursor-not-allowed line-through decoration-slate-300"
+  1161→                            title="Elemento existente apenas no documento atual — não presente no preview"
+  1162→                          >
+  1163→                            {id}
+  1164→                          </span>
+  1165→                        ),
+  1166→                      )}
+  1167→                      {s.ids.length > 40 && (
+  1168→                        <span className="text-[10px] text-slate-400 self-center">+{s.ids.length - 40}…</span>
+  1169→                      )}
+  1170→                    </div>
+  1171→                  </div>
+  1172→                ),
+  1173→              )}
+  1174→              {diff.panel_changed && (
+  1175→                <p className="text-[10.5px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
+  1176→                  Dimensões do painel alteradas — textura LED e vista regeneradas.
+  1177→                </p>
+  1178→              )}
+  1179→            </div>
+  1180→          </motion.div>
+  1181→        )}
+  1182→      </AnimatePresence>
+  1183→    </motion.div>
+  1184→  );
+  1185→}
+  1186→
+  1187→function fmtV(v: { x: number; y: number; z: number }): string {
+  1188→  return `(${Math.round(v.x)}, ${Math.round(v.y)}, ${Math.round(v.z)})`;
+  1189→}
+  1190→
