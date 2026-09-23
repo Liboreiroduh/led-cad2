@@ -1,12 +1,13 @@
 /**
  * PDF ÚNICO — exporter canônico (A2 landscape, template LED Collor).
- * Pipeline: ProjectDocument → projections → dimensions → plan_sheets → PDF.
+ * Pipeline: GeometryDocument → segmentos 3D genéricos → projeções → PDF.
+ * O PDF deriva da GEOMETRIA (nunca de material/perfil).
  * AVISO OBRIGATÓRIO: esboço de referência geométrica.
  */
 import { PDFDocument, StandardFonts, rgb, LineCapStyle, type PDFFont, type PDFPage } from "pdf-lib";
-import type { ProjectDocument } from "@/lib/cad/schema";
+import type { ProjectDocument, GeometryElement } from "@/lib/cad/schema";
+import { panelDimsOf, installationOf } from "@/lib/cad/schema";
 import { deriveBom } from "@/lib/cad/bom";
-import { getProfile } from "@/lib/cad/profiles";
 import { validateProject } from "@/lib/cad/validation";
 
 export const A2 = { w: 1683.78, h: 1190.55 }; // pt, landscape
@@ -48,6 +49,131 @@ export function sanitize(text: string): string {
     .replace(/\u2013|\u2014/g, "-");
 }
 
+/* ==================== EXTRAÇÃO GEOMÉTRICA GENÉRICA ==================== */
+
+type V3 = { x: number; y: number; z: number };
+interface Seg3 {
+  a: V3;
+  b: V3;
+  thickness: number;
+}
+
+const dist3 = (a: V3, b: V3) => Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+
+function boxCorners(center: V3, size: [number, number, number], rotation?: [number, number, number]): V3[] {
+  const [sx, sy, sz] = [size[0] / 2, size[1] / 2, size[2] / 2];
+  const local: V3[] = [];
+  for (const dx of [-sx, sx]) for (const dy of [-sy, sy]) for (const dz of [-sz, sz]) local.push({ x: dx, y: dy, z: dz });
+  if (!rotation || rotation.every((r) => r === 0)) {
+    return local.map((p) => ({ x: center.x + p.x, y: center.y + p.y, z: center.z + p.z }));
+  }
+  const rad = rotation.map((d) => (d * Math.PI) / 180);
+  const rot = (p: V3): V3 => {
+    // ordem X → Y → Z
+    let { x, y, z } = p;
+    [y, z] = [y * Math.cos(rad[0]) - z * Math.sin(rad[0]), y * Math.sin(rad[0]) + z * Math.cos(rad[0])];
+    [x, z] = [x * Math.cos(rad[1]) + z * Math.sin(rad[1]), -x * Math.sin(rad[1]) + z * Math.cos(rad[1])];
+    [x, y] = [x * Math.cos(rad[2]) - y * Math.sin(rad[2]), x * Math.sin(rad[2]) + y * Math.cos(rad[2])];
+    return { x, y, z };
+  };
+  return local.map((p) => {
+    const r = rot(p);
+    return { x: center.x + r.x, y: center.y + r.y, z: center.z + r.z };
+  });
+}
+
+const BOX_EDGES: Array<[number, number]> = [
+  [0, 1], [1, 3], [3, 2], [2, 0],
+  [4, 5], [5, 7], [7, 6], [6, 4],
+  [0, 4], [1, 5], [2, 6], [3, 7],
+];
+
+function planePoint(plane: string, c: V3, r: number, angleRad: number): V3 {
+  if (plane === "XY") return { x: c.x + r * Math.cos(angleRad), y: c.y + r * Math.sin(angleRad), z: c.z };
+  if (plane === "YZ") return { x: c.x, y: c.y + r * Math.cos(angleRad), z: c.z + r * Math.sin(angleRad) };
+  return { x: c.x + r * Math.cos(angleRad), y: c.y, z: c.z + r * Math.sin(angleRad) };
+}
+
+/** Converte QUALQUER primitivo em segmentos 3D — PDF deriva da geometria, ponto final. */
+export function elementSegments(el: GeometryElement): Seg3[] {
+  const g = el.geometry;
+  switch (g.type) {
+    case "line":
+      return [{ a: g.start, b: g.end, thickness: Math.max(g.thickness ?? 8, 1) }];
+    case "beam":
+      return [{ a: g.start, b: g.end, thickness: g.section.type === "round" ? g.section.diameter : g.section.width }];
+    case "cylinder":
+      return [{ a: g.start, b: g.end, thickness: g.diameter }];
+    case "polyline": {
+      const t = Math.max(g.thickness ?? 8, 1);
+      const segs: Seg3[] = [];
+      const pts = g.points;
+      for (let i = 1; i < pts.length; i++) segs.push({ a: pts[i - 1], b: pts[i], thickness: t });
+      if (g.closed && pts.length > 2) segs.push({ a: pts[pts.length - 1], b: pts[0], thickness: t });
+      return segs;
+    }
+    case "box": {
+      const corners = boxCorners(g.center, g.size, g.rotation);
+      return BOX_EDGES.map(([i, j]) => ({ a: corners[i], b: corners[j], thickness: 1 }));
+    }
+    case "circle": {
+      const segs: Seg3[] = [];
+      const n = 64;
+      for (let i = 0; i < n; i++) {
+        segs.push({
+          a: planePoint(g.plane ?? "XY", g.center, g.radius, (i / n) * Math.PI * 2),
+          b: planePoint(g.plane ?? "XY", g.center, g.radius, ((i + 1) / n) * Math.PI * 2),
+          thickness: 1.5,
+        });
+      }
+      return segs;
+    }
+    case "arc": {
+      const segs: Seg3[] = [];
+      const span = g.end_angle - g.start_angle;
+      const n = Math.max(8, Math.min(96, Math.ceil(Math.abs(span) / 4)));
+      for (let i = 0; i < n; i++) {
+        segs.push({
+          a: planePoint(g.plane ?? "XY", g.center, g.radius, ((g.start_angle + (span * i) / n) * Math.PI) / 180),
+          b: planePoint(g.plane ?? "XY", g.center, g.radius, ((g.start_angle + (span * (i + 1)) / n) * Math.PI) / 180),
+          thickness: Math.max(g.thickness ?? 2, 1),
+        });
+      }
+      return segs;
+    }
+    case "polygon":
+    case "surface": {
+      const segs: Seg3[] = [];
+      const pts = g.points;
+      for (let i = 1; i < pts.length; i++) segs.push({ a: pts[i - 1], b: pts[i], thickness: 1.2 });
+      if (pts.length > 2) segs.push({ a: pts[pts.length - 1], b: pts[0], thickness: 1.2 });
+      return segs;
+    }
+    case "mesh": {
+      const segs: Seg3[] = [];
+      const seen = new Set<string>();
+      for (const face of g.faces) {
+        for (let i = 0; i < face.length; i++) {
+          const ia = face[i];
+          const ib = face[(i + 1) % face.length];
+          const key = ia < ib ? `${ia}-${ib}` : `${ib}-${ia}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const va = g.vertices[ia];
+          const vb = g.vertices[ib];
+          if (va && vb) segs.push({ a: va, b: vb, thickness: 1 });
+        }
+      }
+      return segs;
+    }
+    case "dimension":
+      return [{ a: g.start, b: g.end, thickness: 0.8 }];
+    case "text":
+    default:
+      return [];
+  }
+}
+
 /**
  * Projeção ortográfica do documento (front/side/top) para primitivas PDF.
  * `colorFor` opcional permite sobrescrever a cor por elemento (diff com status).
@@ -55,7 +181,7 @@ export function sanitize(text: string): string {
 export function project(
   doc: ProjectDocument,
   view: "front" | "side" | "top",
-  colorFor?: (el: ProjectDocument["elements"][number]) => RGB | undefined,
+  colorFor?: (el: GeometryElement) => RGB | undefined,
 ): { prims: Prim[]; bbox: { min: Pt; max: Pt } } {
   const prims: Prim[] = [];
   const map = (x: number, y: number, z: number): Pt => {
@@ -73,50 +199,14 @@ export function project(
 
   for (const el of doc.elements) {
     const override = colorFor?.(el);
-    if (el.type === "beam") {
-      const prof = getProfile(el.profile);
-      const t = prof ? prof.w : 40;
-      const a = map(el.start.x, el.start.y, el.start.z);
-      const b = map(el.end.x, el.end.y, el.end.z);
-      prims.push({ kind: "line", a, b, thickness: t, color: override ?? INK });
-      grow(a, t / 2);
-      grow(b, t / 2);
-    } else if (el.type === "cable") {
-      const a = map(el.start.x, el.start.y, el.start.z);
-      const b = map(el.end.x, el.end.y, el.end.z);
-      prims.push({ kind: "line", a, b, thickness: el.diameter, color: override ?? GRAY });
-      grow(a, el.diameter / 2);
-      grow(b, el.diameter / 2);
-    } else if (el.type === "plate") {
-      const c = map(el.center.x, el.center.y, el.center.z);
-      const sx = view === "side" ? el.size_y : el.size_x;
-      const sy = view === "top" ? el.size_y : el.size_z;
-      prims.push({ kind: "rect", p: { x: c.x - sx / 2, y: c.y - sy / 2 }, w: sx, h: sy, thickness: 1, color: override ?? INK });
-      grow({ x: c.x - sx / 2, y: c.y - sy / 2 });
-      grow({ x: c.x + sx / 2, y: c.y + sy / 2 });
-    } else if (el.type === "panel") {
-      const c = map(el.center.x, el.center.y, el.center.z);
-      const sx = view === "side" ? el.size_y : el.size_x;
-      const sy = view === "top" ? el.size_y : el.size_z;
-      prims.push({ kind: "rect", p: { x: c.x - sx / 2, y: c.y - sy / 2 }, w: sx, h: sy, thickness: 1.5, color: override ?? NAVY });
-      grow({ x: c.x - sx / 2, y: c.y - sy / 2 });
-      grow({ x: c.x + sx / 2, y: c.y + sy / 2 });
-    } else if (el.type === "bolt") {
-      const c = map(el.center.x, el.center.y, el.center.z);
-      prims.push({ kind: "circle", p: c, r: el.diameter / 2, thickness: 0.8, color: override ?? GRAY });
-      grow(c, el.diameter);
-    } else if (el.type === "surface") {
-      let prev: Pt | null = null;
-      for (const pt of el.points) {
-        const p = map(pt.x, pt.y, pt.z);
-        grow(p);
-        if (prev) prims.push({ kind: "line", a: prev, b: p, thickness: 1.2, color: INK });
-        prev = p;
-      }
-      if (prev && el.points.length) {
-        const first = map(el.points[0].x, el.points[0].y, el.points[0].z);
-        prims.push({ kind: "line", a: prev, b: first, thickness: 1.2, color: INK });
-      }
+    const base = elLedPdf(el) ? NAVY : INK;
+    const color = override ?? base;
+    for (const seg of elementSegments(el)) {
+      const a = map(seg.a.x, seg.a.y, seg.a.z);
+      const b = map(seg.b.x, seg.b.y, seg.b.z);
+      prims.push({ kind: "line", a, b, thickness: seg.thickness, color });
+      grow(a, seg.thickness / 2);
+      grow(b, seg.thickness / 2);
     }
   }
   if (!isFinite(bbox.min.x)) {
@@ -124,6 +214,10 @@ export function project(
     bbox.max = { x: 1000, y: 1000 };
   }
   return { prims, bbox };
+}
+
+function elLedPdf(el: GeometryElement): boolean {
+  return el.metadata?.led === true;
 }
 
 function isoProject(doc: ProjectDocument): { prims: Prim[]; bbox: { min: Pt; max: Pt } } {
@@ -140,73 +234,14 @@ function isoProject(doc: ProjectDocument): { prims: Prim[]; bbox: { min: Pt; max
     bbox.max.y = Math.max(bbox.max.y, p.y + pad);
   };
   for (const el of doc.elements) {
-    if (el.type === "beam") {
-      const prof = getProfile(el.profile);
-      const t = prof ? Math.max(2, prof.w * 0.5) : 20;
-      const a = map(el.start.x, el.start.y, el.start.z);
-      const b = map(el.end.x, el.end.y, el.end.z);
-      prims.push({ kind: "line", a, b, thickness: t, color: INK });
+    const color = elLedPdf(el) ? NAVY : INK;
+    for (const seg of elementSegments(el)) {
+      const t = Math.max(1, Math.min(seg.thickness * 0.5, 30));
+      const a = map(seg.a.x, seg.a.y, seg.a.z);
+      const b = map(seg.b.x, seg.b.y, seg.b.z);
+      prims.push({ kind: "line", a, b, thickness: t, color });
       grow(a, t);
       grow(b, t);
-    } else if (el.type === "cable") {
-      const a = map(el.start.x, el.start.y, el.start.z);
-      const b = map(el.end.x, el.end.y, el.end.z);
-      prims.push({ kind: "line", a, b, thickness: Math.max(2, el.diameter * 0.5), color: GRAY });
-      grow(a);
-      grow(b);
-    } else if (el.type === "plate" || el.type === "panel") {
-      const sx = el.size_x / 2;
-      const sy = el.size_y / 2;
-      const sz = el.size_z / 2;
-      const cx = el.center.x;
-      const cy = el.center.y;
-      const cz = el.center.z;
-      const corners: Array<[number, number, number]> = [
-        [cx - sx, cy - sy, cz - sz],
-        [cx + sx, cy - sy, cz - sz],
-        [cx + sx, cy + sy, cz - sz],
-        [cx - sx, cy + sy, cz - sz],
-        [cx - sx, cy - sy, cz + sz],
-        [cx + sx, cy - sy, cz + sz],
-        [cx + sx, cy + sy, cz + sz],
-        [cx - sx, cy + sy, cz + sz],
-      ];
-      const edges: Array<[number, number]> = [
-        [0, 1],
-        [1, 2],
-        [2, 3],
-        [3, 0],
-        [4, 5],
-        [5, 6],
-        [6, 7],
-        [7, 4],
-        [0, 4],
-        [1, 5],
-        [2, 6],
-        [3, 7],
-      ];
-      for (const [i, j] of edges) {
-        const a = map(...corners[i]);
-        const b = map(...corners[j]);
-        prims.push({ kind: "line", a, b, thickness: 1, color: el.type === "panel" ? NAVY : INK });
-        grow(a);
-        grow(b);
-      }
-    } else if (el.type === "bolt") {
-      const c = map(el.center.x, el.center.y, el.center.z);
-      prims.push({ kind: "circle", p: c, r: el.diameter / 2, thickness: 0.8, color: GRAY });
-      grow(c, el.diameter);
-    } else if (el.type === "surface") {
-      let prev: Pt | null = null;
-      for (const pt of el.points) {
-        const p = map(pt.x, pt.y, pt.z);
-        grow(p);
-        if (prev) prims.push({ kind: "line", a: prev, b: p, thickness: 1, color: INK });
-        prev = p;
-      }
-      if (prev && el.points.length) {
-        prims.push({ kind: "line", a: prev, b: map(el.points[0].x, el.points[0].y, el.points[0].z), thickness: 1, color: INK });
-      }
     }
   }
   if (!isFinite(bbox.min.x)) {
@@ -330,10 +365,12 @@ function drawTitleBlock(page: PDFPage, doc: ProjectDocument, revision: number, s
   page.drawRectangle({ x, y: y + h - 34, width: w, height: 34, color: NAVY });
   page.drawText("LED COLLOR", { x: x + 12, y: y + h - 25, size: 18, font: bold, color: rgb(1, 1, 1) });
   page.drawText(sanitize("ESBOÇO GEOMÉTRICO — PROJECT JSON"), { x: x + 150, y: y + h - 22, size: 10, font, color: rgb(0.85, 0.87, 0.9) });
+  const panel = panelDimsOf(doc);
+  const panelLabel = panel ? `${panel.width} x ${panel.height} x ${panel.depth} mm · PD ${panel.ground_clearance} mm` : "não definido (geometria livre)";
   const rows: Array<[string, string]> = [
     ["PROJETO", sanitize(doc.project.name)],
     ["ID / REV", `${doc.project.id}  ·  REV ${String(revision).padStart(3, "0")}`],
-    ["PAINEL", `${doc.panel.width} x ${doc.panel.height} x ${doc.panel.depth} mm  ·  PD ${doc.panel.ground_clearance} mm`],
+    ["PAINEL", panelLabel],
     ["DATA / UNID", `${new Date().toLocaleDateString("pt-BR")}  ·  mm  ·  ${doc.elements.length} elementos`],
     ["PESO ESTIMADO", `${totalWeight.toFixed(0)} kg  ·  FOLHA ${sheet}`],
   ];
@@ -364,11 +401,10 @@ function drawBanner(page: PDFPage, font: PDFFont, bold: PDFFont, sheetTitle: str
 
 export async function generateProjectPdf(raw: unknown, revision: number): Promise<Uint8Array> {
   const check = validateProject(raw);
-  if (!check.ok) {
+  if (!check.ok || !check.doc) {
     throw new Error(`documento inválido para PDF: ${check.errors[0]?.message ?? "erro"}`);
   }
-  const doc = check.hash ? (raw as ProjectDocument) : null;
-  if (!doc) throw new Error("documento inválido");
+  const doc = check.doc; // normalizado v2 (v1 é convertido)
   const bom = deriveBom(doc);
 
   const pdf = await PDFDocument.create();
@@ -431,10 +467,11 @@ export async function generateProjectPdf(raw: unknown, revision: number): Promis
 
   // Notas / assumptions
   p1.drawText(sanitize("NOTAS E ASSUMPTIONS"), { x: notesBoxX, y: 200 - 24, size: 12, font: bold, color: NAVY });
+  const inst = installationOf(doc);
   const notes = [
-    `Instalação: ${doc.installation.type} · Ambiente: ${doc.installation.environment}`,
+    ...(inst ? [`Instalação: ${inst.type} · Ambiente: ${inst.environment}`] : []),
     ...doc.assumptions.slice(0, 6).map((a) => `- ${typeof a === "string" ? a : `${a.detail} (${a.path})`}`),
-    "- Bays estruturais ≠ grade de gabinetes.",
+    "- Esboço derivado exclusivamente da geometria.",
   ];
   let ny = 200 - 48;
   for (const n of notes) {
@@ -455,7 +492,7 @@ export async function generateProjectPdf(raw: unknown, revision: number): Promis
   const bx = 24;
   const byTop = 430;
   const colW = [50, 460, 90, 150, 130];
-  p2.drawText(sanitize("LISTA DE MATERIAIS (BOM) — derivada do ProjectDocument"), { x: bx, y: byTop + 22, size: 13, font: bold, color: NAVY });
+  p2.drawText(sanitize("LISTA DE MATERIAIS (BOM) — derivada da geometria (opcional)"), { x: bx, y: byTop + 22, size: 13, font: bold, color: NAVY });
   const headers = ["ITEM", "DESCRIÇÃO", "QTD", "COMP. TOTAL (m)", "PESO (kg)"];
   let cx = bx;
   for (let i = 0; i < headers.length; i++) {
@@ -474,7 +511,7 @@ export async function generateProjectPdf(raw: unknown, revision: number): Promis
     ry -= 18;
   }
   p2.drawLine({ start: { x: bx, y: ry + 8 }, end: { x: bx + colW.reduce((a, b) => a + b, 0), y: ry + 8 }, thickness: 0.8, color: LIGHT });
-  p2.drawText(sanitize(`TOTAL ESTIMADO: ${bom.total_weight_kg.toFixed(1)} kg · ${bom.element_count} elementos`), {
+  p2.drawText(sanitize(`TOTAL ESTIMADO: ${bom.total_weight_kg.toFixed(1)} kg · ${bom.element_count} elementos${bom.partial ? " · BOM PARCIAL" : ""}`), {
     x: bx + 6,
     y: ry - 10,
     size: 10,

@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { api, ApiCallError } from "@/lib/cad/client-api";
 import type { Assumption, ProjectDocument, ProjectDiff } from "@/lib/cad/schema";
+import { elRole, elProfile } from "@/lib/cad/schema";
 import type { HistoryItem } from "./types";
 import { ElementBrowser } from "./ElementBrowser";
 import { RevisionHistory } from "./RevisionHistory";
@@ -254,8 +255,8 @@ function CopilotTab(props: CopilotDockProps) {
       {props.selectedElement && (
         <div className="border-t border-slate-200 bg-orange-50/60 px-3 pt-2 pb-1">
           <div className="text-[11px] font-semibold text-orange-800 mb-1.5 truncate">
-            selecionado: {props.selectedElement.id} · {props.selectedElement.type} · {props.selectedElement.role}
-            {props.selectedElement.type === "beam" && ` · ${(props.selectedElement as { profile?: string }).profile ?? ""}`}
+            selecionado: {props.selectedElement.id} · {props.selectedElement.geometry.type} · {elRole(props.selectedElement) || "—"}
+            {elProfile(props.selectedElement) ? ` · ${elProfile(props.selectedElement)}` : ""}
           </div>
           <div className="flex flex-wrap gap-1.5 pb-1.5">
             <Chip icon={<CopyPlus className="h-3 w-3" />} label="duplicar" onClick={() => setInput(`Duplique o elemento ${props.selectedElement!.id} mantendo o alinhamento com o painel e ajustando IDs.`)} />

@@ -27,6 +27,7 @@ import { VIEW_LABELS, VIEWS, type StatusMap, type ViewMode } from "@/components/
 import { api, ApiCallError, type ProjectState, type TransformResult, type PreviewResult, type PresencePeer } from "@/lib/cad/client-api";
 import { estimateElementWeightKg } from "@/lib/cad/bom";
 import type { ProjectDiff, ProjectDocument } from "@/lib/cad/schema";
+import { elRole, elGroup, elProfile, elMaterial } from "@/lib/cad/schema";
 import type { HistoryItem } from "@/components/cad/types";
 
 const Viewer3DNoSSR = dynamic(() => import("@/components/cad/Viewer3D"), {
@@ -727,7 +728,7 @@ export default function Home() {
     if (group === null) {
       setHiddenIds(new Set());
     } else {
-      setHiddenIds(new Set(doc.elements.filter((e) => e.group !== group).map((e) => e.id)));
+      setHiddenIds(new Set(doc.elements.filter((e) => elGroup(e) !== group).map((e) => e.id)));
     }
   }, [projectState, candidate]);
 
@@ -1199,21 +1200,27 @@ export default function Home() {
                     </button>
                   </div>
                   <div className="grid grid-cols-[64px_1fr] gap-x-2 gap-y-0.5 text-slate-600">
-                    <span className="text-slate-400">tipo</span><span>{selectedElement.type}</span>
-                    <span className="text-slate-400">role</span><span>{selectedElement.role}</span>
-                    <span className="text-slate-400">grupo</span><span className="truncate">{selectedElement.group}</span>
-                    {selectedElement.type === "beam" && (
+                    <span className="text-slate-400">tipo</span><span>{selectedElement.geometry.type}</span>
+                    <span className="text-slate-400">role</span><span>{elRole(selectedElement) || "—"}</span>
+                    <span className="text-slate-400">grupo</span><span className="truncate">{elGroup(selectedElement)}</span>
+                    {(elProfile(selectedElement) || elMaterial(selectedElement)) && (
+                      <><span className="text-slate-400">{elProfile(selectedElement) ? "perfil" : "material"}</span><span className="truncate">{elProfile(selectedElement) || elMaterial(selectedElement)}</span></>
+                    )}
+                    {selectedElement.geometry.type === "beam" && (
                       <>
-                        <span className="text-slate-400">perfil</span><span>{selectedElement.profile}</span>
-                        <span className="text-slate-400">start</span><span className="font-mono text-[10px]">{fmtV(selectedElement.start)}</span>
-                        <span className="text-slate-400">end</span><span className="font-mono text-[10px]">{fmtV(selectedElement.end)}</span>
+                        <span className="text-slate-400">seção</span><span>{selectedElement.geometry.section.type === "round" ? `Ø${selectedElement.geometry.section.diameter}` : `${selectedElement.geometry.section.width}×${selectedElement.geometry.section.height}`}</span>
+                        <span className="text-slate-400">start</span><span className="font-mono text-[10px]">{fmtV(selectedElement.geometry.start)}</span>
+                        <span className="text-slate-400">end</span><span className="font-mono text-[10px]">{fmtV(selectedElement.geometry.end)}</span>
                       </>
                     )}
-                    {selectedElement.type === "plate" && (
-                      <><span className="text-slate-400">size</span><span className="font-mono text-[10px]">{selectedElement.size_x}×{selectedElement.size_y}×{selectedElement.size_z}</span></>
+                    {(selectedElement.geometry.type === "line" || selectedElement.geometry.type === "cylinder") && (
+                      <>
+                        <span className="text-slate-400">start</span><span className="font-mono text-[10px]">{fmtV(selectedElement.geometry.start)}</span>
+                        <span className="text-slate-400">end</span><span className="font-mono text-[10px]">{fmtV(selectedElement.geometry.end)}</span>
+                      </>
                     )}
-                    {selectedElement.type === "cable" && (
-                      <><span className="text-slate-400">Ø</span><span>{selectedElement.diameter} mm</span></>
+                    {selectedElement.geometry.type === "box" && (
+                      <><span className="text-slate-400">size</span><span className="font-mono text-[10px]">{selectedElement.geometry.size[0]}×{selectedElement.geometry.size[1]}×{selectedElement.geometry.size[2]}</span></>
                     )}
                     {weightInfo && (
                       <>
@@ -1396,7 +1403,7 @@ export default function Home() {
             {splitActive && <span className="text-amber-300 font-semibold hidden md:inline cad-pulse-soft">A/B rev {restoreInfo}</span>}
             {isolatedGroup && <span className="text-amber-400 hidden md:inline">isolando {isolatedGroup}</span>}
             <span className="hidden lg:inline">
-              {project?.elements.length ?? 0} el. · {new Set((project?.elements ?? []).map((e) => e.group)).size} grupos
+              {project?.elements.length ?? 0} el. · {new Set((project?.elements ?? []).map((e) => elGroup(e))).size} grupos
             </span>
             <Lock className="h-3 w-3" aria-hidden />
             <span>unidade: mm</span>

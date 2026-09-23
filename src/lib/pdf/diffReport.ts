@@ -6,6 +6,7 @@
  */
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import type { ProjectDocument } from "@/lib/cad/schema";
+import { panelDimsOf } from "@/lib/cad/schema";
 import { diffProjects, describeDiff } from "@/lib/cad/diff";
 import { deriveBom } from "@/lib/cad/bom";
 import {
@@ -60,9 +61,13 @@ function drawSummaryTable(
   const { currentDoc, otherDoc, currentRev, otherRev } = input;
   const wA = deriveBom(currentDoc).total_weight_kg;
   const wB = deriveBom(otherDoc).total_weight_kg;
+  const pd = (d: ProjectDocument) => {
+    const p = panelDimsOf(d);
+    return p ? `${p.width}×${p.height}` : "—";
+  };
   const rows: Array<[string, string, string]> = [
     ["REVISÃO", `REV ${otherRev} (comparada)`, `REV ${currentRev} (atual)`],
-    ["PAINEL", `${otherDoc.panel.width}×${otherDoc.panel.height}`, `${currentDoc.panel.width}×${currentDoc.panel.height}`],
+    ["PAINEL", pd(otherDoc), pd(currentDoc)],
     ["ELEMENTOS", String(otherDoc.elements.length), String(currentDoc.elements.length)],
     ["PESO ESTIMADO", `${wB.toFixed(1)} kg`, `${wA.toFixed(1)} kg`],
     ["DIF. PESO", `${(wA - wB >= 0 ? "+" : "") + (wA - wB).toFixed(1)} kg`, ""],
@@ -193,8 +198,11 @@ export async function generateDiffPdf(input: DiffPdfInput): Promise<Uint8Array> 
   drawIdList(page, listX3, listTop, listW, `SAIRIA NA RESTAURAÇÃO (${diff.removed.length})`, PDF_RED, diff.removed, font, bold);
 
   if (diff.panel_changed) {
+    const pb = panelDimsOf(otherDoc);
+    const pa = panelDimsOf(currentDoc);
+    const fmt = (p: { width: number; height: number } | null) => (p ? `${p.width}×${p.height}` : "—");
     page.drawText(
-      sanitize(`ATENÇÃO: dimensões do painel alteradas — ${otherDoc.panel.width}×${otherDoc.panel.height} (rev ${input.otherRev}) vs ${currentDoc.panel.width}×${currentDoc.panel.height} (atual).`),
+      sanitize(`ATENÇÃO: dimensões do painel alteradas — ${fmt(pb)} (rev ${input.otherRev}) vs ${fmt(pa)} (atual).`),
       { x: 24, y: listTop - 260, size: 9.5, font: bold, color: ORANGE },
     );
   }

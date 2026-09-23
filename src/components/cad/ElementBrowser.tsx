@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Eye, EyeOff, Crosshair, Layers, Search, Boxes } from "lucide-react";
 import type { ProjectDocument } from "@/lib/cad/schema";
+import { elGroup, elRole, elProfile } from "@/lib/cad/schema";
 
 export interface ElementBrowserProps {
   project: ProjectDocument;
@@ -24,12 +25,18 @@ export interface ElementBrowserProps {
 }
 
 const TYPE_ICON: Record<string, string> = {
+  line: "╱",
   beam: "▬",
-  plate: "▤",
-  bolt: "⬤",
-  panel: "▣",
-  cable: "⟋",
-  surface: "◇",
+  box: "▤",
+  cylinder: "⬤",
+  circle: "◯",
+  arc: "◠",
+  polyline: "⌁",
+  polygon: "◇",
+  surface: "◈",
+  mesh: "⬡",
+  text: "A",
+  dimension: "↔",
 };
 
 export function ElementBrowser(props: ElementBrowserProps) {
@@ -41,16 +48,13 @@ export function ElementBrowser(props: ElementBrowserProps) {
     const q = query.trim().toLowerCase();
     const map = new Map<string, typeof doc.elements>();
     for (const el of doc.elements) {
-      if (props.isolatedGroup && el.group !== props.isolatedGroup) continue;
-      if (
-        q &&
-        !`${el.id} ${el.type} ${el.role} ${el.group} ${"profile" in el ? el.profile : ""}`.toLowerCase().includes(q)
-      ) {
-        continue;
-      }
-      const list = map.get(el.group) ?? [];
+      const group = elGroup(el);
+      const searchable = `${el.id} ${el.geometry.type} ${elRole(el)} ${group} ${elProfile(el)}`.toLowerCase();
+      if (props.isolatedGroup && group !== props.isolatedGroup) continue;
+      if (q && !searchable.includes(q)) continue;
+      const list = map.get(group) ?? [];
       list.push(el);
-      map.set(el.group, list);
+      map.set(group, list);
     }
     return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }, [doc, query, props.isolatedGroup]);
@@ -150,15 +154,15 @@ export function ElementBrowser(props: ElementBrowserProps) {
                         onClick={() => props.onSelect(selected ? null : el.id)}
                       >
                         <span className="w-4 text-center text-slate-400" aria-hidden>
-                          {TYPE_ICON[el.type] ?? "•"}
+                          {TYPE_ICON[el.geometry.type] ?? "•"}
                         </span>
                         <span className={`font-semibold font-mono truncate ${hidden ? "text-slate-300 line-through" : "text-slate-800"}`}>
                           {el.id}
                         </span>
-                        <span className="text-slate-400 truncate">{el.role}</span>
-                        {"profile" in el && el.profile ? (
-                          <span className="ml-auto text-[10px] text-slate-400 font-mono truncate max-w-24" title={el.profile}>
-                            {el.profile}
+                        <span className="text-slate-400 truncate">{elRole(el)}</span>
+                        {elProfile(el) ? (
+                          <span className="ml-auto text-[10px] text-slate-400 font-mono truncate max-w-24" title={elProfile(el)}>
+                            {elProfile(el)}
                           </span>
                         ) : null}
                         <div className="ml-auto flex gap-0.5 shrink-0">

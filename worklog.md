@@ -2,6 +2,41 @@
 
 ---
 
+Task ID: migrar-geometria-livre-20260923
+Agent: Zoo (Code)
+Task: MIGRAR LED JSON CAD PARA MOTOR GEOMÉTRICO LIVRE (TASK_MIGRAR_LED_JSON_CAD_PARA_GEOMETRIA_LIVRE.md) — trocar o núcleo geométrico sem refazer a infraestrutura.
+
+Work Log:
+- M1 — NOVO SCHEMA (`src/lib/cad/geometry.ts`): GeometryElement {id, geometry, metadata} com 12 primitivos (line, beam, box, cylinder, circle, arc, polyline, polygon, surface, mesh, text, dimension); Vec3 aceita [x,y,z] ou {x,y,z} (normaliza); SectionSchema tolerante com normalização; metadata é record LIVRE (nunca bloqueia); GeometryDocumentSchema v2 sem panel/installation obrigatórios; helpers elName/elGroup/elRole/elProfile/elMaterial/elLed + panelDimsOf/installationOf (extensions legadas).
+- M2 — LEGACY ADAPTER (`src/lib/cad/legacy-adapter.ts`): legacyElementToGeometry (beam→beam+section do perfil, plate→box, bolt→cylinder, panel→box led:true, cable→line, surface→polygon); legacyProjectToGeometry preserva panel/installation em metadata.extensions; normalizeProjectDoc detecta v1×v2 (isLegacyProject).
+- M3 — NÚCLEO: schema.ts reexporta v2 mantendo nomes (ProjectDocument, CadElement, ProjectDocumentSchema) — 16 arquivos continuam compilando; validation.ts reescrito (rígido na geometria: IDs únicos, coords finitas, beams nulos, faces de mesh fora dos vértices; ZERO validação de perfil/material/role; aceita v1 via normalize); diff.ts compara elements + extensions.panel (panel_changed); blank.ts v2.
+- M4 — BOM OPCIONAL GEOMÉTRICO (bom.ts): massa por volumetria (beam/cylinder/box/line/polyline/surface × densidade, default aço 7850, custom metadata.density_kg_m3); circle/arc/mesh/text/dimension = "sem massa calculável"; Bom.partial; deriveBom agrupa por metadata.profile/material/tipo; estimateElementWeightKg puro.
+- M5 — RENDERER (sceneBuilder.ts): buildProjectGroup decide por geometry.type (renderLine/renderBeam/renderBox/renderCylinder/renderCircle/renderArc/renderPolyline/renderPolygon/renderSurface/renderMesh/renderText/renderDimension); textura LED por metadata.led (não por tipo semântico); cor por metadata.color "#rrggbb" → paleta por primitivo; box com rotation; cotas/vistas/ghost diff preservados.
+- M6 — CONTRATO IA: prompts.ts SYSTEM_PROMPT v2 (princípio "A IA ESCREVE O DOCUMENTO, O CAD DESENHA"; mini-schema dos 12 primitivos em tuple; sem catálogo/roles); mock.ts reescrito v2 (casos painel/parede/cabos/diagonal/arco/mesh — Testes A–G determinísticos); registry.ts: repairProjectInfo (IA omite raiz project → preserva a atual), GUARDA contra candidato com elements vazio (retry com feedback "devolva o documento COMPLETO"), few-shot legado convertido na injeção (não ensinar formato errado).
+- M7 — STORE/PRESETS: STORE_VERSION 7; boot normaliza project.json v1→v2; replace()/undo() normalizam snapshots antigos (restauração de revisão legada converte); makeLogEntry usa panelDimsOf; presets.referencePresets() converte a saída do gerador clássico para v2 (cache).
+- M8 — PDF: report.ts extrator genérico elementSegments (QUALQUER primitivo → segmentos 3D; box rotacionado → 12 arestas; circle/arc amostrados; mesh arestas únicas) → project()/isoProject() consomem; drawTitleBlock/notes via panelDimsOf/installationOf; "BOM PARCIAL" quando incompleto; diffReport.ts idem (panel dims de extensions).
+- M9 — UI: page.tsx (info do elemento via geometry/metadata + helpers), ElementBrowser (busca/ícones para 12 tipos), CopilotDock (chips contextuais), meta route schema_version 2 (PROFILES como referência opcional).
+- FIXES DURANTE MIGRAÇÃO: SectionSchema positive rejeitava diameter:0 de seções quadradas do adapter (input tolerante min(0) + normalização); cache stale do bundle Next (.next) dava 400 fantasma → limpeza + restart do dev server; Z.ai local dá 502 estruturado not_configured (.z-ai-config só existe no sandbox — usar Gemini/Mock).
+- Rota /api/ai/test recriada (não veio do sandbox; 404 travava o botão ATIVAR do Conector).
+- AMBIENTE LOCAL (Windows): .env DATABASE_URL file:../db/custom.db; scripts npm sem tee/cp/bun-standalone; bun install; prisma generate.
+
+Testes (§16 — via curl contra a API local):
+- A beam sem material ✅ | B role "dobradica_customizada" ✅ | C TUBO_200x10 desconhecido ✅ | D line role=cable ✅ | E mesh arbitrária ✅ | arco+text extras ✅ (todos aceitos na rev 3 sem erro)
+- F JSON legado v1 importado → 200 convertido (extensions.panel preservado) ✅
+- G "adicione uma peça inclinada..." (mock) → DIAG-01 beam inclinado criado sem add_brace ✅
+- GEMINI REAL: transform 200 em 43–45s, attempts 1, candidato com 59/59 elementos preservados + text novo ✅ (após repairProjectInfo + guarda de candidato vazio)
+- PDF export 200 ✅ | BOM 200 ✅ | tsc --noEmit limpo ✅
+- Teste H (imagem): infra pronta (Gemini supports_image, anexos fluem) — pendente validação visual pelo operador.
+
+Stage Summary:
+- Critério §17 atendido: geometria nova é desenhada SEM alterar código (metadata/mesh são o escape).
+- 20/20 não-negociáveis respeitados: infra preservada, servidor único, diff/preview/apply/undo/histórico intactos, Gemini+Z.ai, BOM opcional, JSON antigo continua abrindo.
+- Z.ai local exige credencial do sandbox (.z-ai-config) — erro 502 orientado na UI; Gemini operacional com API key do operador.
+- Próximos passos sugeridos: few-shot de exemplos v2 coletados pelo uso; PDF com labels de text; converter mesh emcolisão/cota; limpeza final M8 (remover catálogo de profiles do caminho do BOM quando docs v2 dominarem).
+
+---
+
+
 Task ID: 1
 Agent: Z.ai Code (main)
 Task: Implementar o TASK MASTER "LED JSON CAD BUILDER" — CAD dirigido por ProjectDocument JSON com IA como transformadora de documento, dual provider (Gemini + Z.ai), diff do sistema, preview 3D antes de apply, undo por snapshot, presets, JSON editor, PDF/BOM.
