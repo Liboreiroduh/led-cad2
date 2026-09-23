@@ -42,19 +42,27 @@ export interface TransformMeta {
   attempts: number;
   /** id do exemplo few-shot usado (§25) — null quando nenhum aplicável */
   few_shot_id: string | null;
-  /** similaridade de Jaccard entre pedido e exemplo escolhido (0–1) */
+  /** score híbrido de similaridade (Jaccard + cobertura do pedido, 0–1) */
   few_shot_score: number | null;
 }
 
 /**
  * Escolhe o exemplo few-shot mais RELEVANTE que caiba no orçamento de tokens.
- * Relevância = similaridade de Jaccard entre os tokens do pedido do usuário e do
- * exemplo (stopwords PT/EN removidas); empate → exemplo mais recente.
- * Guard de economia (§16/§34): exemplo completo (antes+depois) ≤ ~220KB combinados
- * e documento "antes" com até 120 elementos — acima disso o custo supera o ganho.
+ * Score HÍBRIDO de similaridade (§25):
+ *   score = W_JACCARD × jaccard(pedido, exemplo)  +  W_COVERAGE × cobertura(pedido)
+ * onde cobertura = fração dos tokens do PEDIDO presentes no exemplo — favores
+ * exemplos que cobrem mais da intenção do usuário, não só vocabulário compartilhado.
+ * Empate → exemplo mais recente (ordem de iteração). Guard de economia (§16/§34):
+ * exemplo completo (antes+depois) ≤ ~220KB combinados, documento "antes" com até
+ * 120 elementos e score mínimo — abaixo disso o exemplo é ruído e o custo de tokens
+ * supera o ganho (transforma sem few-shot).
  */
 const FEW_SHOT_MAX_ELEMENTS = 120;
 const FEW_SHOT_MAX_BYTES = 220_000;
+const FEW_SHOT_W_JACCARD = 0.6;
+const FEW_SHOT_W_COVERAGE = 0.4;
+/** score mínimo para o exemplo valer o custo de tokens (ruído abaixo disso) */
+const FEW_SHOT_MIN_SCORE = 0.06;
 
 /** stopwords PT + EN — não contam para similaridade */
 const FEW_SHOT_STOPWORDS = new Set(
@@ -79,13 +87,6 @@ function requestTokens(text: string): Set<string> {
   return out;
 }
 
-function jaccard(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) return 0;
-  let inter = 0;
-  for (const t of a) if (b.has(t)) inter++;
-  return inter / (a.size + b.size - inter);
-}
-
 function pickFewShot(userRequest: string): { id: string; request: string; before: string; after: string; score: number } | null {
   try {
     const examples = getStore().listExamples();
@@ -99,7 +100,14 @@ function pickFewShot(userRequest: string): { id: string; request: string; before
       const before = JSON.stringify(ex.before);
       const after = JSON.stringify(ex.after);
       if (!before || !after || before.length + after.length > FEW_SHOT_MAX_BYTES) continue;
-      const score = jaccard(query, requestTokens(ex.request));
+      const exTokens = requestTokens(ex.request);
+      let inter = 0;
+      for (const t of query) if (exTokens.has(t)) inter++;
+      const jac = inter / (query.size + exTokens.size - inter || 1);
+      const coverage = query.size > 0 ? inter / query.size : 0;
+      const score = FEW_SHOT_W_JACCARD * jac + FEW_SHOT_W_COVERAGE * coverage;
+      // score fraco = exemplo irrelevante poluindo o contexto — melhor sem few-shot
+      if (score < FEW_SHOT_MIN_SCORE) continue;
       if (!best || score > best.score) best = { id: ex.id, request: ex.request, before, after, score };
     }
     return best;

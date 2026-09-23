@@ -97,6 +97,8 @@ export interface RevisionDocResult {
 
 export const api = {
   health: () => call<{ ok: boolean; revision: number }>("/api/health"),
+  /** presença multi-operador: contadores leves para polling (sem o documento) */
+  presence: () => call<{ revision: number; hash: string; updated_at: string }>("/api/presence"),
   meta: () =>
     call<{
       active_provider: string;

@@ -101,6 +101,11 @@ export default function Home() {
   const renameCancelRef = useRef(false);
   const dockDragRef = useRef<{ startX: number; startW: number } | null>(null);
   const dockWidthRef = useRef(dockWidth);
+  // presença multi-operador: detecta mudanças aplicadas por OUTRA sessão no mesmo store
+  const [remoteChange, setRemoteChange] = useState<{ revision: number; hash: string; updated_at: string } | null>(null);
+  const remoteChangeRef = useRef<{ revision: number; hash: string; updated_at: string } | null>(null);
+  const mutatingRef = useRef(false);
+  const projectStateRef = useRef<ProjectState | null>(null);
 
   // arraste da alça de redimensionamento do dock (desktop)
   useEffect(() => {
@@ -169,10 +174,19 @@ export default function Home() {
     }
   }, [historyKey]);
 
+  useEffect(() => {
+    projectStateRef.current = projectState;
+  }, [projectState]);
+
   const refresh = useCallback(async () => {
     try {
       const st = await api.getProject();
       setProjectState(st);
+      // estado local re-sincronizado com o servidor — limpa alerta de operador remoto
+      if (remoteChangeRef.current) {
+        remoteChangeRef.current = null;
+        setRemoteChange(null);
+      }
     } catch (e) {
       toast.error((e as ApiCallError).message);
     }
@@ -194,6 +208,59 @@ export default function Home() {
     void refresh();
     void refreshProviderInfo();
   }, [refresh, refreshProviderInfo]);
+
+  // ---------- presença multi-operador (polling leve em /api/presence) ----------
+  // Detecta alterações feitas por outra sessão/aba no mesmo store do servidor.
+  // Hash igual → em sincronia; rev do servidor MAIOR → outro operador aplicou;
+  // rev MENOR → resposta antiga de mutação própria em voo (descartada).
+  // Mutações próprias pausam a detecção (mutatingRef) para não gerar falso alerta.
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = (ms: number) => {
+      timer = setTimeout(() => void tick(), ms);
+    };
+    const tick = async () => {
+      if (!alive) return;
+      try {
+        const p = await api.presence();
+        if (!alive || !p) return;
+        const local = projectStateRef.current;
+        if (local && !mutatingRef.current) {
+          if (p.hash === local.hash) {
+            if (remoteChangeRef.current) {
+              remoteChangeRef.current = null;
+              setRemoteChange(null);
+            }
+          } else if (p.revision > local.revision) {
+            const prev = remoteChangeRef.current;
+            const next = { revision: p.revision, hash: p.hash, updated_at: p.updated_at };
+            remoteChangeRef.current = next;
+            setRemoteChange(next);
+            if (!prev || prev.revision !== p.revision) {
+              toast.info(`Outro operador aplicou a rev ${p.revision} — clique no alerta da topbar para sincronizar`, { duration: 8000 });
+            }
+          }
+        }
+      } catch {
+        // rede indisponível — tenta de novo no próximo ciclo
+      }
+      if (alive) schedule(document.visibilityState === "hidden" ? 20000 : 6000);
+    };
+    schedule(4000);
+    const onVis = () => {
+      if (document.visibilityState === "visible" && timer) {
+        clearTimeout(timer);
+        schedule(800);
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
 
   // ref síncrono do restoreInfo para uso no handler de teclado (evita stale closure)
   const restoreInfoRef = useRef<number | null>(null);
@@ -235,6 +302,7 @@ export default function Home() {
   }, []);
 
   const doUndo = useCallback(async () => {
+    mutatingRef.current = true;
     try {
       const st = await api.undo();
       setProjectState(st);
@@ -247,8 +315,19 @@ export default function Home() {
       const err = e as ApiCallError;
       if (err.payload?.type === "nothing_to_undo") toast.info("Nada para desfazer");
       else toast.error(err.payload?.message ?? err.message);
+    } finally {
+      mutatingRef.current = false;
     }
   }, [pushHistory]);
+
+  /** Sincroniza com a rev do servidor ao clicar no alerta de outro operador. */
+  const syncFromServer = useCallback(async () => {
+    remoteChangeRef.current = null;
+    setRemoteChange(null);
+    await refresh();
+    setHistoryRefreshKey((k) => k + 1);
+    toast.success("Projeto sincronizado com o servidor");
+  }, [refresh]);
 
   // ---------- transform via IA ----------
   /** Notifica o usuário quando a transformação longa termina com a aba em segundo plano. */
@@ -376,6 +455,7 @@ export default function Home() {
 
   const applyCandidate = useCallback(async () => {
     if (!candidate) return;
+    mutatingRef.current = true;
     try {
       // restauração de revisão usa a rota dedicada (source "restore" no log)
       const st = restoreInfo !== null
@@ -416,6 +496,8 @@ export default function Home() {
       } else {
         toast.error(err.payload?.message ?? err.message);
       }
+    } finally {
+      mutatingRef.current = false;
     }
   }, [candidate, restoreInfo, pushHistory, refresh, doUndo]);
 
@@ -488,6 +570,7 @@ export default function Home() {
     if (!name || name === projectState.project.project.name) return;
     renameBusyRef.current = true;
     setRenameBusy(true);
+    mutatingRef.current = true;
     try {
       const st = await api.renameProject(name, projectState.revision, projectState.hash);
       setProjectState(st);
@@ -507,6 +590,7 @@ export default function Home() {
     } finally {
       renameBusyRef.current = false;
       setRenameBusy(false);
+      mutatingRef.current = false;
     }
   }, [projectState, renaming, renameValue, doUndo, refresh]);
 
@@ -542,6 +626,7 @@ export default function Home() {
 
   const actions = {
     newProject: async () => {
+      mutatingRef.current = true;
       try {
         const st = await api.newProject();
         setProjectState(st);
@@ -551,9 +636,12 @@ export default function Home() {
         pushHistory({ role: "info", text: "Novo projeto em branco criado." });
       } catch (e) {
         toast.error((e as ApiCallError).message);
+      } finally {
+        mutatingRef.current = false;
       }
     },
     importJson: async (file: File) => {
+      mutatingRef.current = true;
       try {
         const text = await file.text();
         const doc = JSON.parse(text);
@@ -566,6 +654,8 @@ export default function Home() {
         toast.success("Projeto importado");
       } catch (e) {
         toast.error((e as ApiCallError).payload?.message ?? (e as Error).message);
+      } finally {
+        mutatingRef.current = false;
       }
     },
     exportPdf: async () => {
@@ -734,6 +824,37 @@ export default function Home() {
               <Badge variant="outline" className="text-slate-400 border-slate-600">
                 {project.elements.length} el.
               </Badge>
+              {/* presença multi-operador — verde quando em sincronia, âmbar pulsante quando outro operador alterou */}
+              <AnimatePresence>
+                {remoteChange ? (
+                  <motion.button
+                    key="remote"
+                    initial={{ opacity: 0, scale: 0.9, x: -4 }}
+                    animate={{ opacity: 1, scale: 1, x: 0 }}
+                    exit={{ opacity: 0, scale: 0.9 }}
+                    transition={{ duration: 0.18 }}
+                    onClick={() => void syncFromServer()}
+                    className="hidden xl:inline-flex items-center gap-1.5 h-6 px-2 rounded-full bg-amber-400/15 border border-amber-400/60 text-amber-300 text-[10px] font-bold tracking-wide hover:bg-amber-400/25 active:scale-95 transition-all outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+                    title={`Servidor na rev ${remoteChange.revision} (atualizado ${agoShort(remoteChange.updated_at)} atrás) — clique para sincronizar`}
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400 cad-pulse-soft" aria-hidden />
+                    OUTRO OPERADOR · rev {remoteChange.revision}
+                    <span className="text-amber-200/80 font-black">↻</span>
+                  </motion.button>
+                ) : (
+                  <motion.span
+                    key="synced"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="hidden xl:inline-flex items-center gap-1.5 h-6 px-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-300/90 text-[10px] font-semibold"
+                    title="Em sincronia com o servidor — verificação automática a cada 6s"
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />
+                    SINCRONIZADO
+                  </motion.span>
+                )}
+              </AnimatePresence>
             </div>
           )}
 
@@ -1194,6 +1315,7 @@ export default function Home() {
           <span className="hidden sm:inline truncate">JSON do projeto é a fonte de verdade · canvas é visualização · PDF/BOM derivados</span>
           <span className="ml-auto flex items-center gap-2 shrink-0">
             {candidate && <span className="text-orange-400 font-semibold">PREVIEW ATIVO</span>}
+            {remoteChange && <span className="text-amber-300 font-semibold cad-pulse-soft" role="status">outro operador · rev {remoteChange.revision}</span>}
             {splitActive && <span className="text-amber-300 font-semibold hidden md:inline cad-pulse-soft">A/B rev {restoreInfo}</span>}
             {isolatedGroup && <span className="text-amber-400 hidden md:inline">isolando {isolatedGroup}</span>}
             <span className="hidden lg:inline">
@@ -1372,4 +1494,12 @@ function DiffInspector({ diff, onPick }: { diff: ProjectDiff; onPick: (id: strin
 
 function fmtV(v: { x: number; y: number; z: number }): string {
   return `(${Math.round(v.x)}, ${Math.round(v.y)}, ${Math.round(v.z)})`;
+}
+
+/** “há 12s / 5min / 2h” — para o tooltip do alerta de operador remoto */
+function agoShort(iso: string): string {
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}min`;
+  return `${Math.floor(s / 3600)}h`;
 }

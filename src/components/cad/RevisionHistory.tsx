@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   History, RefreshCw, Loader2, GitCompare, Sparkles, Braces, Upload, FileJson,
-  Undo2, RotateCcw, FilePlus2, Circle, Monitor, FileText, Pencil, Search, ListFilter,
+  Undo2, RotateCcw, FilePlus2, Circle, Monitor, FileText, Pencil, Search, ListFilter, Download,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
@@ -64,6 +64,43 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
   const [pdfBusy, setPdfBusy] = useState<number | null>(null);
   const [filter, setFilter] = useState<string>("all");
   const [query, setQuery] = useState("");
+
+  /** Exporta as revisões EXIBIDAS (filtro + busca aplicados) como CSV — “;” + BOM p/ Excel pt-BR. */
+  const exportCsv = () => {
+    if (filtered.length === 0) return;
+    const esc = (v: string | number | null | undefined) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const header = ["revisao", "salvo_em", "fonte", "nota", "hash", "elementos", "painel_largura", "painel_altura", "atual"];
+    const lines = [
+      header.map(esc).join(";"),
+      ...filtered.map((r) =>
+        [
+          r.revision,
+          r.saved_at,
+          r.source,
+          r.note,
+          r.hash,
+          r.element_count,
+          r.panel?.width ?? "",
+          r.panel?.height ?? "",
+          r.is_current ? "sim" : "nao",
+        ]
+          .map(esc)
+          .join(";"),
+      ),
+    ];
+    const csv = `\uFEFF${lines.join("\n")}\n`;
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `led-cad-revisoes-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    const scope = filter !== "all" || query.trim() ? ` (filtro: ${SOURCE_FILTERS.find((f) => f.id === filter)?.label ?? "all"}${query.trim() ? ` · busca “${query.trim()}”` : ""})` : "";
+    toast.success(`CSV gerado — ${filtered.length} revisões${scope}`);
+  };
 
   const downloadDiffPdf = async (rev: number) => {
     setPdfBusy(rev);
@@ -133,14 +170,25 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
           <History className="h-3.5 w-3.5 text-orange-600" />
           REVISÕES DO PROJETO
         </span>
-        <button
-          onClick={() => void load()}
-          className="text-slate-400 hover:text-orange-600 transition-colors"
-          aria-label="Recarregar histórico"
-          title="Recarregar"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={exportCsv}
+            disabled={filtered.length === 0}
+            className="grid place-items-center h-6 w-6 rounded-md text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-400 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60"
+            aria-label="Exportar revisões exibidas como CSV"
+            title="Exportar CSV das revisões exibidas (respeita filtro e busca)"
+          >
+            <Download className="h-3.5 w-3.5" />
+          </button>
+          <button
+            onClick={() => void load()}
+            className="text-slate-400 hover:text-orange-600 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-orange-400/60 rounded-md"
+            aria-label="Recarregar histórico"
+            title="Recarregar"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+          </button>
+        </div>
       </div>
 
       <div className="px-3 py-2 border-b border-slate-200 bg-white space-y-1.5">
@@ -211,8 +259,10 @@ export function RevisionHistory({ comparingRev, onCompare, refreshKey, onRestore
                   aria-hidden
                 />
                 <div
-                  className={`rounded-lg border p-2.5 transition-colors ${
-                    r.is_current ? "border-orange-300 bg-orange-50/70" : "border-slate-200 bg-white hover:border-slate-300"
+                  className={`rounded-lg border p-2.5 transition-all hover:shadow-sm ${
+                    r.is_current
+                      ? "border-orange-300 bg-orange-50/70 shadow-[inset_3px_0_0_0_#f97316]"
+                      : "border-slate-200 bg-white hover:border-slate-300 hover:-translate-y-px"
                   }`}
                 >
                   <div className="flex items-center gap-1.5 flex-wrap">
