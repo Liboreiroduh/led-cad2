@@ -54,3 +54,4 @@ server.log
 /skills/
 # LED JSON CAD local data (project store, ai keys, examples)
 /data/
+tool-results/
