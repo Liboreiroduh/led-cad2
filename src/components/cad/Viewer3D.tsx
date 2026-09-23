@@ -5,7 +5,7 @@
  * preview ghost (added=verde, modified=laranja, removed=vermelho),
  * cotas de envelope (L/H/P) e ferramenta de medição de distâncias.
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
@@ -40,6 +40,8 @@ export interface Viewer3DProps {
   measureMode?: boolean;
   /** resultado da última medição (limpo com null) */
   onMeasureResult?: (r: { distance: number } | null) => void;
+  /** pausa o loop de render (usado na comparação A/B p/ liberar GPU) */
+  paused?: boolean;
 }
 
 interface RefState {
@@ -78,6 +80,8 @@ export default function Viewer3D(props: Viewer3DProps) {
     propsRef.current = props;
   });
   const pendingDownRef = useRef<{ x: number; y: number } | null>(null);
+  // incrementado quando o contexto WebGL é restaurado — força rebuild do conteúdo
+  const [ctxEpoch, setCtxEpoch] = useState(0);
 
   // ---------- init ----------
   useEffect(() => {
@@ -121,10 +125,21 @@ export default function Viewer3D(props: Viewer3DProps) {
     let raf = 0;
     const animate = () => {
       raf = requestAnimationFrame(animate);
+      if (propsRef.current.paused) return; // economiza GPU enquanto A/B ativo
       controls.update();
       renderer.render(scene, camera);
     };
     animate();
+
+    // recuperação de perda de contexto WebGL (ex.: muitos viewports ativos)
+    const onContextLost = (ev: Event) => {
+      ev.preventDefault(); // permite o browser restaurar depois
+      console.warn("[Viewer3D] WebGL context lost — aguardando restore");
+    };
+    const onContextRestored = () => {
+      console.warn("[Viewer3D] WebGL context restored");
+      setCtxEpoch((n) => n + 1); // força rebuild do conteúdo
+    };
 
     const onResize = () => {
       if (!mount.clientWidth) return;
@@ -182,6 +197,8 @@ export default function Viewer3D(props: Viewer3DProps) {
     dom.addEventListener("pointerdown", onPointerDown);
     dom.addEventListener("pointerup", onPointerUp);
     dom.addEventListener("pointermove", onPointerMove);
+    dom.addEventListener("webglcontextlost", onContextLost);
+    dom.addEventListener("webglcontextrestored", onContextRestored);
 
     return () => {
       cancelAnimationFrame(raf);
@@ -189,6 +206,8 @@ export default function Viewer3D(props: Viewer3DProps) {
       dom.removeEventListener("pointerdown", onPointerDown);
       dom.removeEventListener("pointerup", onPointerUp);
       dom.removeEventListener("pointermove", onPointerMove);
+      dom.removeEventListener("webglcontextlost", onContextLost);
+      dom.removeEventListener("webglcontextrestored", onContextRestored);
       controls.dispose();
       renderer.dispose();
       mount.removeChild(dom);
@@ -238,7 +257,7 @@ export default function Viewer3D(props: Viewer3DProps) {
     fitViewInternal(st, propsRef.current.viewMode);
     // reaplica highlight atual
     applyHighlightInternal(st, propsRef.current.selectedId);
-  }, [props.project, props.candidate, props.statuses, props.candidateStatuses, props.fitKey]);
+  }, [props.project, props.candidate, props.statuses, props.candidateStatuses, props.fitKey, ctxEpoch]);
 
   // ---------- cotas toggle ----------
   useEffect(() => {

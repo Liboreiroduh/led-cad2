@@ -598,6 +598,7 @@ export default function Home() {
                 showDimensions={showDimensions}
                 measureMode={measureMode}
                 onMeasureResult={setMeasureResult}
+                paused={splitActive}
                 />
               </div>
             ) : (
@@ -855,7 +856,7 @@ export default function Home() {
                       {candidate.diff.panel_changed ? " · painel alterado" : ""}
                     </span>
                   </div>
-                  <div className="flex gap-2 items-center">
+                  <div className="flex gap-2 items-center flex-wrap justify-center sm:justify-end">
                     {/* alternador de modo de comparação (só no fluxo de restauração) */}
                     {restoreInfo !== null && (
                       <div

@@ -195,7 +195,6 @@ export default function CompareSplit(props: CompareSplitProps) {
         tint="border-t-rose-500"
         title={`ATUAL · rev ${revA}`}
         badge={`${elementsA} el.`}
-        note={`${diffCounts.removed} só aqui · ${diffCounts.modified} editadas`}
         accentText="text-rose-700"
       />
 
@@ -213,17 +212,20 @@ export default function CompareSplit(props: CompareSplitProps) {
         tint="border-t-emerald-500"
         title={`REV ${revB} · restaurável`}
         badge={`${elementsB} el.`}
-        note={`${diffCounts.added} só aqui · ${diffCounts.modified} editadas`}
         accentText="text-emerald-700"
       />
 
       {/* cabeçalho flutuante */}
-      <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-[#1b2836]/95 backdrop-blur text-white rounded-full pl-3 pr-1.5 py-1.5 shadow-xl border border-slate-600/60 z-10">
-        <Columns2 className="h-4 w-4 text-orange-400" aria-hidden />
-        <span className="text-[11px] font-bold tracking-wide">
+      <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-[#1b2836]/95 backdrop-blur text-white rounded-full pl-3 pr-1.5 py-1.5 shadow-xl border border-slate-600/60 z-10 whitespace-nowrap max-w-[calc(100%-16px)]">
+        <Columns2 className="h-4 w-4 text-orange-400 shrink-0" aria-hidden />
+        <span className="text-[11px] font-bold tracking-wide whitespace-nowrap">
           COMPARAÇÃO A/B · rev {revA} <span className="text-slate-400">vs</span> rev {revB}
         </span>
-        <span className="hidden sm:flex items-center gap-1 text-[10px] text-slate-300 border-l border-slate-600 pl-2 ml-1">
+        <span className="hidden md:inline text-[10px] font-semibold text-slate-300 border-l border-slate-600 pl-2 ml-0.5 whitespace-nowrap">
+          <span className="text-emerald-400">+{diffCounts.added}</span> <span className="text-orange-400">~{diffCounts.modified}</span>{" "}
+          <span className="text-rose-400">-{diffCounts.removed}</span>
+        </span>
+        <span className="hidden lg:flex items-center gap-1 text-[10px] text-slate-300 border-l border-slate-600 pl-2 ml-1 whitespace-nowrap">
           <MousePointer2 className="h-3 w-3" /> órbita sincronizada
         </span>
         <button
@@ -246,7 +248,6 @@ function Pane({
   side,
   title,
   badge,
-  note,
   tint,
   accentText,
 }: {
@@ -254,20 +255,18 @@ function Pane({
   side: "A" | "B";
   title: string;
   badge: string;
-  note: string;
   tint: string;
   accentText: string;
 }) {
   return (
     <div className={`relative flex-1 min-w-0 min-h-0 rounded-xl overflow-hidden border border-slate-300 shadow-lg bg-slate-100 border-t-4 ${tint}`}>
       <div ref={mountRef} className="absolute inset-0" aria-label={`Viewport 3D ${side}`} role="application" />
-      <div className={`absolute bottom-2 left-2 flex items-center gap-2 bg-white/92 backdrop-blur rounded-lg px-2.5 py-1.5 shadow border border-slate-200 pointer-events-none`}>
-        <span className={`text-[10px] font-black grid place-items-center h-5 w-5 rounded ${side === "A" ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}`} aria-hidden>
+      <div className={`absolute top-2 left-2 flex items-center gap-1.5 bg-white/92 backdrop-blur rounded-lg px-2 py-1 shadow border border-slate-200 pointer-events-none`}>
+        <span className={`text-[10px] font-black grid place-items-center h-4.5 w-4.5 px-1 rounded ${side === "A" ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}`} aria-hidden>
           {side}
         </span>
         <span className={`text-[11px] font-bold ${accentText}`}>{title}</span>
         <span className="text-[10px] text-slate-500">{badge}</span>
-        <span className="hidden sm:inline text-[10px] text-slate-400 border-l border-slate-200 pl-2">{note}</span>
       </div>
       {/* fallback de load (canvas monta de imediato — loader só para SSR flash) */}
       <div className="absolute inset-0 grid place-items-center text-slate-300 pointer-events-none" aria-hidden>
