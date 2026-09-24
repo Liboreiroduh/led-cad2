@@ -10,7 +10,7 @@ Kit de deploy para Ubuntu 22.04/24.04 **do zero**. A versão canônica é sempre
 | App | Next.js `output: standalone` → `bun run start` na porta **3000** |
 | Proxy | Caddy (porta 80/443, HTTPS automático se houver domínio) |
 | Serviço | systemd (`ledcad.service`) com restart automático |
-| Banco | SQLite via Prisma → `/opt/ledcad/db/custom.db` |
+| Banco | SQLite via Prisma → `/opt/ledcad/db/custom.db` (schema versionado em `prisma/migrations/`) |
 | Dados runtime | `/opt/ledcad/data/` (projeto, revisões, presets, chaves de IA) |
 
 > `data/` e `db/` estão no `.gitignore` → **nunca são sobrescritos** por `git pull` nos updates.
@@ -59,15 +59,23 @@ systemctl reload caddy           # recarregar proxy
 tail -f /var/log/caddy/*.log     # logs do proxy
 ```
 
-## 5. Backup
+## 5. Banco de dados
+
+- **Chave de conexão (`DATABASE_URL`)**: definida em `/opt/ledcad/.env` (`file:/opt/ledcad/db/custom.db`) e também no [deploy/ledcad.service](ledcad.service). Não há login/usuários por design — o app é single-tenant.
+- **Schema versionado**: [prisma/schema.prisma](../prisma/schema.prisma) com migrações em `prisma/migrations/`. O deploy aplica com `prisma migrate deploy` (idempotente — só aplica o que falta).
+- **Modelos**: `project_state` (estado canônico do projeto), `revisions` (histórico/undo), `ai_provider_config` (chaves de IA, server-side only), `custom_presets`, `examples`.
+- **Nova migração** (no PC, após editar o schema): `bunx prisma migrate dev --name descricao` → commit + push → `bash /opt/ledcad/deploy/update.sh` na VPS.
+- **Verificação pós-deploy**: `curl -s http://127.0.0.1:3000/api/health` → deve responder `"database":"ok"`.
+
+## 6. Backup
 
 ```bash
 # Tudo que importa (dados + banco):
 tar czf backup-$(date +%F).tgz -C /opt/ledcad data db .env
 ```
 
-## 6. Health check
+## 7. Health check
 
 ```bash
-curl -s http://127.0.0.1:3000/api/health   # deve responder ok
+curl -s http://127.0.0.1:3000/api/health   # deve responder ok + "database":"ok"
 ```

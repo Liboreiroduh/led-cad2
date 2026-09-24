@@ -58,15 +58,15 @@ fi
 mkdir -p db data
 chown -R "${APP_USER}:${APP_USER}" db data
 
-echo "==> [7/8] Instalando dependencias, Prisma e build de producao"
+echo "==> [7/8] Instalando dependencias, Prisma (migrate deploy) e build de producao"
 su - "${APP_USER}" -c "
   set -e
   cd ${APP_DIR}
   export PATH=\$HOME/.bun/bin:\$PATH
   export DATABASE_URL=file:${APP_DIR}/db/custom.db
   bun install --frozen-lockfile
+  bun run db:deploy
   bun run db:generate
-  bunx prisma db push --skip-generate
   bun run build
 "
 

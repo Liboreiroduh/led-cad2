@@ -20,8 +20,8 @@ sudo -u "${APP_USER}" bash -lc '
   export PATH=$HOME/.bun/bin:$PATH
   export DATABASE_URL=file:'"${APP_DIR}"'/db/custom.db
   bun install --frozen-lockfile
+  bun run db:deploy
   bun run db:generate
-  bunx prisma db push --skip-generate
   bun run build
 '
 

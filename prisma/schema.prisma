@@ -1,8 +1,8 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// LED CAD — Schema do banco (SQLite via Prisma)
+// Domínio real da aplicação. Sem autenticação/login por design:
+// o app é single-tenant e o estado canônico vive no documento JSON do projeto.
+// Espelha a persistência de src/lib/store.ts (data/*.json) para garantir
+// consistência, histórico versionado e base estruturada na VPS.
 
 generator client {
   provider = "prisma-client-js"
@@ -13,20 +13,77 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// Estado canônico do projeto ativo (espelha data/project.json)
+model ProjectState {
+  id          String   @id @default(cuid())
+  projectId   String   @unique @map("project_id")
+  name        String   @default("Projeto sem título")
+  revision    Int      @default(1)
+  projectHash String   @map("project_hash")
+  document    String // JSON canônico (ProjectDocument — src/lib/cad/schema.ts)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  revisions Revision[]
+
+  @@index([updatedAt])
+  @@map("project_state")
 }
 
-model Post {
+// Histórico de revisões / undo (espelha data/revisions.json e data/undo.json)
+model Revision {
+  id           String       @id @default(cuid())
+  project      ProjectState @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId    String       @map("project_id")
+  revision     Int
+  hash         String
+  source       String       @default("manual_json") // init | ai_apply | manual_json | import | preset | undo | restore | new | rename
+  note         String?
+  elementCount Int          @default(0) @map("element_count")
+  document     String // snapshot JSON do projeto na revisão
+  savedAt      DateTime     @default(now()) @map("saved_at")
+
+  @@unique([projectId, revision])
+  @@index([projectId, savedAt])
+  @@map("revisions")
+}
+
+// Configuração de provedores de IA (espelha data/ai_config.json)
+// Chaves ficam server-side apenas — nunca vão ao frontend.
+model AiProviderConfig {
   id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  provider  String   @unique // zai | gemini | mock | ...
+  apiKey    String?  @map("api_key")
+  model     String?
+  enabled   Boolean  @default(true)
+  config    String? // JSON extra do provider
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("ai_provider_config")
+}
+
+// Presets customizados salvos pelo usuário (espelha data/presets/custom/*.json)
+model CustomPreset {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String?
+  document    String // JSON do preset (ProjectDocument)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("custom_presets")
+}
+
+// Exemplos salvos (espelha data/examples/*.json)
+model Example {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String?
+  document    String // JSON do exemplo (ProjectDocument)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("examples")
 }
