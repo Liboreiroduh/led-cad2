@@ -2,6 +2,182 @@
 
 ---
 
+Task ID: fix-html-oriented-20260923
+Agent: Zoo (Code)
+Task: CORRIGIR ORIENTAÇÃO DOS MEMBROS NO HTML STANDALONE (vigas retas saíam "de lado" — leque/rógulo na roda).
+
+Work Log:
+- CAUSA: no gerador standalone, oriented() alinhava SEMPRE o eixo local +Y com a direção do membro; mas BoxGeometry(w,h,len) coloca o COMPRIMENTO no eixo Z → vigas de seção reta ficavam rotacionadas 90°, aparecendo como espetas radiando (o "leque" da roda no print do operador).
+- FIX (standalone.ts): oriented(a, b, makeGeo, axis) com eixo local explícito — beam reta: BoxGeometry + eixo (0,0,1) (igual ao sceneBuilder); beam/cylinder redonda: CylinderGeometry + eixo (0,1,0); line/polyline: (0,1,0). Agora o standalone replica 1:1 a orientação do editor.
+- Testes: tsc/eslint limpos; /api/export/html 200 (2,04 MB) — download/demo-cliente.html regenerada.
+
+Stage Summary:
+- O HTML standalone agora interpreta a geometria EXATAMENTE como o modelo 3D do editor (mesma convenção de eixos por tipo de primitivo).
+
+---
+
+Task ID: demo-html-standalone-20260923
+Agent: Zoo (Code)
+Task: EXPORT HTML STANDALONE — demonstração interativa 3D + visões, arquivo único pronto para o cliente.
+
+Work Log:
+- NOVO GERADOR (src/lib/html/standalone.ts): generateStandaloneHtml(doc, revision) → arquivo HTML ÚNICO e autocontido. Header com logo (base64 de public/logo-ledcollor.png, fallback tipográfico), nome do projeto, REV, data, banner de responsabilidade estrutural.
+- 3D INTERATIVO: three.js 0.160 via importmap CDN (jsdelivr) + OrbitControls; constrói o modelo client-side a partir do GeometryDocument embutido (window.__LED_DOC__ com escapes \u003c) com o MESMO estilo técnico do editor (faces claras flatShading, EdgesGeometry escuras, silhueta inverted-hull, wireframe leve em surfaces/meshes); botões de vista (3D/Frente/Fundo/Esquerda/Direita/Topo/Isométrica + Enquadrar), toggle de grade, checkboxes por CONJUNTO para ocultar/mostrar no 3D; resize observer; grid + luzes.
+- VISÕES SVG GERADAS NO SERVIDOR: projectionSvg consome a MESMA projeção da prancha (projectView front/side/top) → FRONTAL/LATERAL/PLANTA em cards SVG inline (funciona até sem JS).
+- RESUMO: projeto, id/rev, elementos/conjuntos, encaixe do painel (legado), instalação, premissas e avisos. Print CSS.
+- ROTA /api/export/html (POST, attachment text/html, filename ledcollor-cad-{id}-rev{N}.html); client-api.downloadStandaloneHtml; botão HTML na topbar ao lado de PRANCHA (estado htmlBusy, toast).
+- FIX: escapeHtml reescrito com String.fromCharCode(38) — entidades nomeadas literais no fonte foram corrompidas no transporte e quebravam o parse.
+- Testes: tsc/eslint limpos; POST /api/export/html 200 → download/demo-cliente.html com 2,0 MB (logo base64 + doc + 3 SVGs + viewer), contém __LED_DOC__/importmap/SVGs.
+
+Stage Summary:
+- O cliente recebe UM arquivo .html que abre em qualquer navegador: giro o modelo em 3D, alterna vistas, liga/desliga conjuntos, vê as visões ortográficas e o resumo — mesma geometria e estilo da prancha.
+
+---
+
+Task ID: prancha-maximo-detalhe-20260923
+Agent: Zoo (Code)
+Task: MÁXIMO DETALHE NA PRANCHA — sombreamento por orientação de face, triangulação interna, hachura de solo e rótulos de conjunto.
+
+Work Log:
+- TOM POR ORIENTAÇÃO DE FACE: faceNormalZ (Newell) → topo das lajes/telhados com tom 10% mais escuro, fundos 18% — leitura de plano sem shading (mixRGB para o tom FILL_DARK).
+- TRIANGULAÇÃO INTERNA NO PDF: polygon/surface ganham diagonais do leque como traços leves (thickness 0.6, light, noNode); mesh ganha diagonais das faces com teto de 3000; drawProjection desenha light com EDGE_SOFT a 50% da espessura.
+- HACHURA DE SOLO: traços a 45° abaixo da linha SOLO ±0 (clássico de desenho técnico).
+- RÓTULOS DE CONJUNTO: drawGroupLabels — nome do grupo (até 10) no topo do bbox de cada conjunto na vista FRONTAL, chip branco 85%.
+- Orçamento de fills 2500→4000 (prismas aumentaram as faces).
+- Testes: tsc limpo em src/ (após corrigir light? no tipo de segs e EDGE_SOFT→LINE_SOFT), eslint limpo, 3 PDFs regenerados OK.
+
+---
+
+Task ID: membros-prisma-pdf-20260923
+Agent: Zoo (Code)
+Task: SALTO DE QUALIDADE DA PRANCHA LIVRE — membros desenhados como prismas (não linhas soltas) + isométrica com profundidade de traço (alvo: croqui arquitetônico completo, ref. imagem do operador).
+
+Work Log:
+- MEMBROS COMO PRISMAS NO PDF (report.ts): beam/cylinder agora geram PRISMA real (memberPrism/sectionRing/prismSegments/prismFaces) — seção reta = prisma de 4 lados (12 arestas), redonda = octógono (24 arestas); arestas marcadas noNode (não viram nós de cadeia de cotas — cadeias continuam saindo do EIXO do membro, limpas); FACES do prisma entram no preenchimento cinza claro → postes/vigas/tubos aparecem como sólidos desenhados com contorno, e não como linhas soltas. Membro degenerado (len<0.001) cai para linha simples.
+- ISO COM PROFUNDIDADE DE TRAÇO: cada aresta carrega depth (x−y+0.3z); drawProjection mapeia para TOM (LINE_SOFT→cinza escuro 0.32) e ESPESSURA (×0.75–1.3) — perto escuro/forte, longe claro/leve: sensação de croqui de perspectiva à mão.
+- Verificado com o projeto real do operador (agora casa com surfaces: 43 el., Z 20–6100) e nos 3 PDFs de exemplo — geração OK, orientação OK, cadeias limpas.
+
+Stage Summary:
+- A prancha agora "desenha" os membros: cada viga/posto/tubo é um volume com arestas e faces claras, e a isométrica tem profundidade de traço — o maior passo até agora rumo ao croqui arquitetônico completo da imagem de referência.
+
+---
+
+Task ID: refinamento-tecnico-3d-round2-20260923
+Agent: Zoo (Code)
+Task: REFINAMENTO FINAL DO MODO TÉCNICO — cotas mais próximas, hierarquia mais forte, hidden mais discreto, mais detalhe arquitetônico.
+
+Work Log:
+- HIERARQUIA REFORÇADA: silhueta mais escura (0x313840→0x272d34) e inflação 1,5%→1,8%; arestas de recurso mais escuras (0x5b646f→0x4d555f); traços internos mais leves (0xa6adb6→0xb6bdc5, wireframe opacity 0.28→0.2).
+- COTAS MAIS PRÓXIMAS: primitivo `dimension` com offset 10%→5% do comprimento (cap 25–220); cotas do envelope (buildDimensionGroup) com off 7%→4,5% da diagonal e deslocamentos das linhas 0,55→0,38 — as cotas agora ficam coladas à geometria que medem.
+- HIDDEN DISCRETO: tracejadas só quando a geometria tem ≤4000 triângulos (meshes grandes ficam sem hidden — evita ruído), threshold min(recurso,14°), opacity 0.4→0.3.
+- MAIS DETALHE ARQUITETÔNICO: threshold de recurso em surface/mesh 18°→14° — esquadrias, marquise, sacadas e planos de vidro modelados aparecem nas arestas.
+- Testes: tsc limpo em src/, eslint limpo, HMR OK.
+
+---
+
+Task ID: wireframe-assistido-20260923
+Agent: Zoo (Code)
+Task: REFINAR O MODO "DESENHO TÉCNICO 3D" — faces quase desaparecendo, hidden edges tracejados, mais traços úteis e cotas ancoradas.
+
+Work Log:
+- FACES DISCRETAS: paleta clareada de novo (membros 0xe9edf1, box 0xecf0f3, superfícies 0xf2f4f7, linhas 0xb3bbc4) — o foco visual vai para as arestas; flatShading mantém mudanças de plano perceptíveis sem shading pesado.
+- HIDDEN EDGES: addTechLines ganhou passada de arestas OCULTAS tracejadas (LineDashedMaterial EDGE_HIDDEN 0xbac2cb, opacity 0.4, depthTest false, computeLineDistances) com dash adaptativo ao raio da bounding sphere (8–90mm); renderOrder 1 (sob as arestas visíveis em 2). Caixa: as 12 arestas existem em versão visível E tracejada → leitura "enxergando através" (wireframe assistido). Superfícies/mesh: hidden com threshold reduzido (min(10°)) quando ≤6000 triângulos, senão usa o threshold de recurso.
+- MAIS TRAÇOS: threshold de recurso 30°→18° em surface/mesh (vincos sutis aparecem); wireframe interno ampliado (cap 1500→4000 triângulos, opacidade 0.28).
+- COTAS ANCORADAS (dimLine reescrita): linha de cota PARALELA deslocada da geometria com linhas de extensão (122% do offset) ligando os pontos medidos, ticks nas âncoras, setas na linha deslocada e rótulo sobre ela — padrão de desenho técnico, sem flutuar sobre o modelo. Primitivo `dimension` agora usa medidas proporcionais ao trecho (labelH 6% do comprimento cap 25–260; offset 10% cap 40–420) em vez de constantes globais.
+- Testes: tsc limpo em src/, eslint limpo, HMR OK; todos os fluxos de API continuam 200.
+
+Stage Summary:
+- De "bloco sólido com algumas linhas" para "desenho técnico 3D": silhueta forte → arestas médias → hidden tracejado discreto → triangulação leve; faces quase brancas; cotas ancoradas com extensão. Vale para casa, painel, estrutura, formas abertas e geometrias livres.
+
+---
+
+Task ID: visual-desenho-tecnico-3d-20260923
+Agent: Zoo (Code)
+Task: HIERARQUIA VISUAL DE TRAÇOS NO VIEWER 3D — silhueta × arestas × traços internos (fim do "volume chapado").
+
+Work Log:
+- SISTEMA DE TRAÇOS (sceneBuilder.ts): 1) SILHUETA via inverted hull — clone do mesh com material BackSide cinza-escuro (EDGE_DARK 0x3d444d) inflado 1,5% em torno do centro da bounding sphere (funciona com geometria centrada E absoluta) → contorno externo forte de qualquer ângulo; 2) ARESTAS DE RECURSO — EdgesGeometry com ângulo-limite (quinas/mudanças de plano reais, sem ruído de triangulação); 3) TRAÇOS INTERNOS — WireframeGeometry cinza-claro (EDGE_SOFT, opacidade 0.32) só para polygon/surface/mesh com teto de 1500 triângulos (legibilidade sem peso).
+- APLICAÇÃO POR PRIMITIVO: box → silhueta + 12 arestas (threshold 1); box LED → silhueta + arestas laranja existentes mantidas; beam → silhueta + arestas (threshold 1 p/ seção reta, 30 p/ redonda: só aros); cylinder → silhueta + aros; line/polyline/arc-tubo → silhueta por segmento (tubos finos); polygon/surface → silhueta + contorno + triangulação interna; mesh → silhueta + dobras reais (threshold 30°) + triangulação leve.
+- MATERIAIS: MeshStandard mais fosco e flat (metalness 0.55→0.06, roughness 0.9, flatShading true, polygonOffset p/ arestas sem z-fight); paleta CLAREADA (STEEL 0x8b95a1→0xd7dce2, box→0xcfd5db, superfícies→0xe3e7eb, linhas 0xaab2bc); metadata.color é clareada 40% p/ branco (lighten()) — cor mantém matiz sem dominar. Status de diff (verde/laranja/vermelho) preservados.
+- PERFORMANCE: silhueta compartilha material estático; wireframe interno limitado; filhos herdam visibilidade dos pais registrados no byId (toggle/isolar continuam funcionando); raycast de seleção intocado (fill recebe o clique primeiro).
+- Testes: tsc limpo em src/, eslint limpo, HMR compilou; Viewer3D com iluminação hemisférica+direcional existente realça as facetas planas.
+
+Stage Summary:
+- O viewer agora lê como desenho técnico 3D: contorno forte, quinas médias, traços internos leves, preenchimentos claros — hierarquia visual real em vez de blocos chapados.
+
+---
+
+Task ID: logo-ledcollor-20260923
+Agent: Zoo (Code)
+Task: IDENTIDADE VISUAL — logo LED Collor no quadro do PDF e no programa ("LED Collor CAD").
+
+Work Log:
+- LOGO: 'LOGO-LEDCOLLOR-FINAL-VETORIZADA.png' (9183×2671, RGBA, 3.44:1) copiada para public/logo-ledcollor.png.
+- PDF (report.ts): drawTitleBlock recebe a logo embedada (public/, fs no runtime do servidor, fallback para texto "LED COLLOR" se o arquivo faltar); header do quadro ganha chip branco + drawImage (h=22pt) e o subtítulo "ESBOÇO GEOMÉTRICO COTADO" desloca para a direita. Rodapé do banner: "LED Collor CAD · esboço de referência geométrica".
+- PDF DE DIF (diffReport.ts): mesma logo no rodapé (chip h=18) + marca "LED Collor CAD".
+- UI (page.tsx): topbar troca o quadrado "LC" por chip branco com a logo (h-6) + título "LED Collor CAD"; notificação de IA atualizada. layout.tsx: <title> "LED Collor CAD". meta route: app "LED Collor CAD". CompareSplit: snapshot A/B "COMPARAÇÃO A/B — LED Collor CAD".
+- Testes: tsc limpo em src/, eslint limpo; PDFs de exemplo regenerados (~1,1 MB com a logo embutida); /api/export/pdf com o doc real 200 (1,18 MB).
+
+Stage Summary:
+- Marca consistente: logo LED Collor no title block do PDF (todas as folhas), no PDF de diferenças e na topbar do programa com o nome "LED Collor CAD".
+
+---
+
+Task ID: fix-prancha-invertida-20260923
+Agent: Zoo (Code)
+Task: CORRIGIR PRANCHA PDF DE CABEÇA PRA BAIXO (relato do operador com JSON antigo importado) + investigar travamento do node + hardening de corpo gigante.
+
+Work Log:
+- DIAGNÓSTICO COM O PROJETO REAL IMPORTADO (data/project.json, 110 elementos: 48 box + 62 beam, Z real 0..5020): TODOS os passos do pipeline passam in-process (validate/normalize, diff, hash, BOM, PDF 3 folhas) — a conversão v1→v2 NÃO foi a causa.
+- CAUSA RAIZ DA PRANCHA INVERTIDA: em PDF o eixo Y cresce PARA CIMA, mas o toPage do desenhista SUBTRAÍA o y do modelo — quanto maior o Z, mais BAIXO na folha. Bug herdado do exportador antigo (mesma fórmula), que só incomodou agora que a prancha é o foco. FIX: y da página = box.y + pad + (y_model − effMinY)·escala (direto, sem inversão); verificado numericamente pelos rótulos no stream do PDF: "CASA TESTE" (z=4700) em y=905 na frontal / 1090 na lateral / 260 na planta (borda frontal — convenção correta de planta) / 728 iso / 706 traseira; laje embaixo, telhado em cima.
+- SOLO NO ENQUADRAMENTO: quando a geometria está afastada do chão (bbox.min.z > 20), o solo (z=0) entra no cálculo de escala (effMinY=0) — linha SOLO ±0 e cota PD agora nascem DENTRO do quadro da vista; condição do rótulo "SOLO +/-0" corrigida (checagem contra a página, não contra a caixa). Quando a estrutura toca o chão (z_min=0, caso do projeto importado), a linha de solo é omitida corretamente.
+- TRAVAMENTO DO NODE ("deu erro no node inteiro"): reproduzido uma vez localmente (event loop do dev server travou, todas as rotas em timeout — inclusive presence) e recuperado com restart; TODOS os fluxos com o doc real passam em sequência (project → preview +1 → apply → undo → bom → pdf 65 KB) — sem reprodução determinística; suspeita: travamento transitório do Next dev (HMR+compile) localmente e/ou stress de colagem gigante na versão online com build antigo. HARDENING: readJsonBody agora limita corpo a 8 MB (content-length + tamanho lido) com erro estruturado legível — cola gigante no editor/import/IA não derruba mais o servidor; mensagem de JSON inválido orienta a conferir o documento colado.
+- Ferramentas novas: .zscripts/diag-import.ts (diagnóstico completo com o doc real + verificação de orientação) e .zscripts/test-api-flows.ts (fluxos da API com timeout por passo).
+- Testes: tsc limpo em src/, eslint limpo; test-api-flows 100% OK contra o servidor local.
+
+Stage Summary:
+- Prancha sai orientada corretamente (solo embaixo, topo em cima) para qualquer documento, incluindo JSON antigo convertido.
+- Proteção contra corpos gigantes; travamento do node não reproduzível nos fluxos locais — se voltar a ocorrer na versão online, verificar build antigo/recurso do sandbox (o deploy precisa do código atual).
+
+---
+
+Task ID: fix-viewport-menus-inferiores-20260923
+Agent: Zoo (Code)
+Task: CORRIGIR MENUS INFERIORES CORTANDO/DESAPARECENDO (relato do operador na versão online) + subir app localmente.
+
+Work Log:
+- CAUSA RAIZ: raiz do app usava `h-screen` (100vh) — em navegadores com barra de URL/toolbar dinâmica (mobile/tablet) ou preview embutido, 100vh é MAIOR que a área visível e o fim da coluna (barra de abas IA/ELEMENTOS/HISTÓRICO/JSON + rodapé) caía fora da tela. Agravante: MobileSheet com alturas fixas em vh (`46vh`, `calc(46vh-18px)` + min-h-220px) e wrapper `shrink-0` — em telas baixas com o sheet aberto o conteúdo estourava e cortava a navegação; toast bottom-right cobria a barra de abas.
+- FIX: raiz com `h-screen supports-[height:100dvh]:h-[100dvh]` + overflow-hidden (dvh = altura visível real, com fallback para vh em motores antigos); main com overflow-hidden; wrapper mobile sem shrink-0; MobileSheet raiz `flex-1 min-h-0`, SHEET_H = `min(46vh, 46dvh)`, motion.div min-h-0 (flexbox encolhe o painel quando a tela é baixa) e conteúdo interno `flex-1 min-h-0 overflow-y-auto` (rola em vez de cortar) — a barra de abas (com safe-area iOS) fica SEMPRE visível; Toaster movido para top-center (não cobre mais a navegação inferior).
+- Testes: tsc limpo em src/, eslint limpo (page/layout/MobileSheet); dev server subiu (`bun run dev`, porta 3000), `/` e `/api/health` 200.
+
+Stage Summary:
+- Nos menus inferiores nunca mais desaparecem: com sheet aberto em tela baixa o painel encolhe e rola; sem sheet, abas+rodapé sempre dentro do dvh visível.
+- App local operando em http://localhost:3000 para conferência da prancha geométrica (botão PRANCHA).
+
+---
+
+Task ID: prancha-geometrica-cotada-20260923
+Agent: Zoo (Code)
+Task: REDESENHAR EXPORT PDF COMO PRANCHA TÉCNICA DE REFERÊNCIA — esboço geométrico cotado (forma + dimensões + encaixe), sem conteúdo de fabricação.
+
+Work Log:
+- FOCO DO PDF (`src/lib/pdf/report.ts` reescrito): o PDF deixou de ser documento de fabricação e virou ESBOÇO GEOMÉTRICO COTADO. Removidos BOM, peso estimado, material, perfil, densidade e qualquer lista de corte — title block agora mostra projeto, id/rev, contagem de elementos/conjuntos, data/folha e (se legado) "REF. ENCAIXE PAINEL W×H×D · PD". Banner/aviso reescrito: "sem definição de material, perfil ou fabricação · dimensionamento estrutural sob responsabilidade de profissional habilitado".
+- MOTOR DE VISTAS: projectView(doc, view) com front/back/side/top/iso; projeção por elemento (segs + faces + texts + dims). Folhas DINÂMICAS: 1 = frontal (grande, cadeias completas) + lateral + planta com cotas overall; 2 = isométrica + TRASEIRA (somente se assimétrica em profundidade — detectado por fingerprint geométrico, senão nota explicativa); 3 = DETALHES POR CONJUNTO (grid 4×N com vista frontal por grupo + cotas overall, até 12 grupos) quando ≥2 grupos.
+- COTAS AVANÇADAS: cadeias horizontais (eixos verticais → divisões de postes/módulos/gabinetes) e verticais (níveis de altura) por clustering com tolerância proporcional (cap 14 eixos); overall W×H; linha SOLO ±0 quando geometria elevada; PD (afastamento do solo) cotado à direita; ângulos de segmentos inclinados marcados com arco+graus (8°–82°, cap 6); primitivo `dimension` renderizado como cota real; primitivo `text` desenhado na vista; nota de escala "ESC ~1:N".
+- ESTILO VISUAL LEVE: geometria em cinzas (EDGE 0.24 contornos fortes, LINE 0.46 membros, LINE_SOFT iso), superfícies com preenchimento cinza claro FILL (0.945) com contorno sutil, painel/encaixe em FILL_LED azulado sutil; preto sólido eliminado da geometria (mantido só em texto de bloco de título). Preenchimento de polígonos via drawSvgPath (confirmado y-flip scale(1,-1) no pdf-lib) com atalho drawRectangle para retânguros alinhados; iso ordena faces por profundidade (x−y+0.3z); mesh >256 faces vira só arestas (legível, sem massa); budget de 2500 fills/vista.
+- LEGIBILIDADE GEOMETRIA LIVRE: pipeline é 100% derivado dos 12 primitivos v2 — funciona para casa, mesh, arcos, V, articulações, qualquer forma (painel LED é só uso); testado com casa irregular (lajes/paredes/telhado mesh/arc/cota/text) gerando prancha legível de 3 folhas.
+- diffReport.ts atualizado para a nova API (projectView/drawProjection), resumo sem pesos (REVISÃO/PAINEL/ELEMENTOS/+~−), rodapé "comparação puramente geométrica"; cores de diff preservadas (verde/laranja/vermelho sobre base cinza).
+- UI: botão "PDF" → "PRANCHA" com tooltip "esboço geométrico cotado", toast "Prancha PDF gerada", rodapé "prancha geométrica/BOM derivados". Rota /api/export/pdf inalterada (mesma assinatura). BOM continua disponível separadamente (rota/dialog BOM).
+- ROBUSTEZ DE LAYOUT: TF carrega box; linha de solo e PD se auto-contêm na caixa da vista (skip quando não cabe); frontal deslocada (x=100) para cadeia vertical não sair da página; rótulos de cota com fundo branco 0.92.
+- Testes: tsc limpo em src/ (erros pré-existentes só em examples/); eslint limpo nos 3 arquivos; .zscripts/test-prancha-pdf.ts gera 3 PDFs em download/ (painel 3 folhas, casa livre 3 folhas, diff 1 folha) — verificação de streams confirma cadeias (150/1580/150/1980…), overall (2380/6050 mm), ângulos (44°), escalas (~1:21), legenda, encaixe painel 2000×4000×650, e ZERO ocorrências de PESO/kg/MATERIAIS/PERFIL/CORTE/SOLDA.
+
+Stage Summary:
+- Critério do produto atendido: "menos lista de peças, mais desenho geométrico técnico cotado e visualmente legível" — prancha com vistas úteis por geometria, cotas de divisão interna, visual cinza leve, aviso de responsabilidade correto.
+- PDFs de exemplo: download/teste-prancha-painel.pdf, download/teste-prancha-livre.pdf, download/teste-prancha-diff.pdf (regeneráveis via bun .zscripts/test-prancha-pdf.ts).
+- Próximos passos sugeridos: hachura de solo (padrão), marcas de encaixe dedicadas (painel × estrutura), numeração de módulos via metadata para cotas nomeadas.
+
+---
+
 Task ID: migrar-geometria-livre-20260923
 Agent: Zoo (Code)
 Task: MIGRAR LED JSON CAD PARA MOTOR GEOMÉTRICO LIVRE (TASK_MIGRAR_LED_JSON_CAD_PARA_GEOMETRIA_LIVRE.md) — trocar o núcleo geométrico sem refazer a infraestrutura.

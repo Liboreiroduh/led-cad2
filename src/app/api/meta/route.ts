@@ -9,7 +9,7 @@ export async function GET() {
   const store = getStore();
   const cfg = store.getAiConfig();
   return ok({
-    app: "LED JSON CAD",
+    app: "LED Collor CAD",
     vendor: "LED Collor",
     schema_version: 2,
     units: "mm",

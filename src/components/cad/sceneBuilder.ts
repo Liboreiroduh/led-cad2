@@ -18,8 +18,121 @@ export const STATUS_COLORS: Record<DiffStatus, number> = {
   unchanged: 0x64748b,
 };
 
-const STEEL = 0x8b95a1;
+/* ==================== HIERARQUIA DE TRAÇOS (desenho técnico 3D) ====================
+ * 1) SILHUETA  — contorno externo forte (inverted hull, cinza escuro)
+ * 2) ARESTAS   — quinas/mudanças de plano reais (EdgesGeometry, cinza médio)
+ * 3) INTERNO   — triangulação leve de superfícies livres (cinza claro)
+ * Preenchimentos claros e flat shading: nada de massa escura dominando.
+ */
+const EDGE_DARK = 0x272d34; // silhueta (traço mais forte)
+const EDGE_MED = 0x4d555f; // arestas de recurso (traço médio)
+const EDGE_SOFT = 0xb6bdc5; // traços internos (mais leves)
+const EDGE_HIDDEN = 0xbfc6ce; // arestas ocultas (tracejadas, discretas)
+
+const STEEL = 0xe9edf1; // preenchimento quase branco (membros)
 const PANEL = 0x1f2937;
+
+/** Clareia uma cor misturando com branco — evita superfícies escuras dominando. */
+function lighten(color: number, amt = 0.4): number {
+  const r = (color >> 16) & 255;
+  const g = (color >> 8) & 255;
+  const b = color & 255;
+  const mix = (v: number) => Math.round(v + (255 - v) * amt);
+  return (mix(r) << 16) | (mix(g) << 8) | mix(b);
+}
+
+const _silhouetteMat = new THREE.MeshBasicMaterial({ color: EDGE_DARK, side: THREE.BackSide });
+
+/**
+ * Infla o mesh ~1,5% com material BackSide escuro → contorno de silhueta
+ * legível de qualquer ângulo (o clássico "inverted hull" de desenho técnico).
+ * Funciona com geometria centrada na origem OU com coordenadas absolutas
+ * (infla em torno do centro da bounding sphere).
+ */
+function addSilhouette(host: THREE.Object3D, geo: THREE.BufferGeometry, scale = 1.018): void {
+  geo.computeBoundingSphere();
+  const c = geo.boundingSphere?.center;
+  const hull = new THREE.Mesh(geo, _silhouetteMat);
+  if (c && (Math.abs(c.x) > 1e-6 || Math.abs(c.y) > 1e-6 || Math.abs(c.z) > 1e-6)) {
+    hull.position.set(c.x * (1 - scale), c.y * (1 - scale), c.z * (1 - scale));
+  }
+  hull.scale.setScalar(scale);
+  hull.userData.elementId = host.userData.elementId;
+  host.add(hull);
+}
+
+/**
+ * Traços técnicos sobre um volume:
+ *  - arestas de recurso (quinas/mudanças de plano acima de featureThreshold graus)
+ *  - malha interna leve (triangulação) para geometrias livres, com teto de triângulos
+ */
+function addTechLines(
+  host: THREE.Object3D,
+  geo: THREE.BufferGeometry,
+  opts: { featureThreshold?: number; innerWireframe?: boolean; edgeColor?: number; edgeOpacity?: number; hidden?: boolean; wireCap?: number } = {},
+): void {
+  const {
+    featureThreshold = 25,
+    innerWireframe = false,
+    edgeColor = EDGE_MED,
+    edgeOpacity = 0.95,
+    hidden = false,
+    wireCap = 4000,
+  } = opts;
+  const id = host.userData.elementId as string | undefined;
+  const tag = (o: THREE.Object3D) => {
+    if (id) o.userData.elementId = id;
+    host.add(o);
+  };
+
+  geo.computeBoundingSphere();
+  const radius = geo.boundingSphere?.radius ?? 1000;
+
+  // ARESTAS OCULTAS — tracejadas, sem depth test, discretas; só em geometrias pequenas/médias
+  // (meshes grandes ficam ruidosas — nelas só as arestas de recurso existem)
+  if (hidden) {
+    const tris = geo.index ? geo.index.count / 3 : (geo.getAttribute("position")?.count ?? 0) / 3;
+    if (tris <= 4000) {
+      const useThreshold = Math.min(featureThreshold, 14);
+      const dashed = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geo, useThreshold),
+        new THREE.LineDashedMaterial({
+          color: EDGE_HIDDEN,
+          transparent: true,
+          opacity: 0.3,
+          depthTest: false,
+          dashSize: Math.min(Math.max(radius * 0.02, 8), 90),
+          gapSize: Math.min(Math.max(radius * 0.013, 5), 60),
+        }),
+      );
+      dashed.computeLineDistances();
+      dashed.renderOrder = 1;
+      tag(dashed);
+    }
+  }
+
+  // ARESTAS DE RECURSO — quinas/mudanças de plano (visíveis, traço médio)
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geo, featureThreshold),
+    new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: edgeOpacity }),
+  );
+  edges.renderOrder = 2;
+  tag(edges);
+
+  // TRAÇOS INTERNOS — triangulação leve (superfícies livres)
+  if (innerWireframe) {
+    const pos = geo.getAttribute("position");
+    const tris = geo.index ? geo.index.count / 3 : pos ? pos.count / 3 : 0;
+    if (tris > 0 && tris <= wireCap) {
+      const wire = new THREE.LineSegments(
+        new THREE.WireframeGeometry(geo),
+        new THREE.LineBasicMaterial({ color: EDGE_SOFT, transparent: true, opacity: 0.2 }),
+      );
+      wire.renderOrder = 2;
+      tag(wire);
+    }
+  }
+}
 
 /** Textura de painel LED (módulos + pixels) gerada em canvas — referência visual. */
 let _panelTexture: THREE.CanvasTexture | null = null;
@@ -89,27 +202,27 @@ export interface BuiltScene {
 /* ============================ CORES BASE POR PRIMITIVO ============================ */
 
 const BASE_COLORS: Record<string, number> = {
-  line: 0x6b7280,
+  line: 0xb3bbc4,
   beam: STEEL,
-  box: 0x5d6673,
-  cylinder: 0x8b95a1,
-  circle: 0x6b7280,
-  arc: 0x6b7280,
-  polyline: 0x6b7280,
-  polygon: 0x94a3b8,
-  surface: 0x94a3b8,
-  mesh: 0x94a3b8,
+  box: 0xecf0f3,
+  cylinder: STEEL,
+  circle: 0x99a2ac,
+  arc: 0x99a2ac,
+  polyline: 0xb3bbc4,
+  polygon: 0xf2f4f7,
+  surface: 0xf2f4f7,
+  mesh: 0xf2f4f7,
   text: 0x475569,
   dimension: 0x475569,
 };
 
-/** Cor do elemento: metadata.color (#rrggbb) → paleta por tipo → status de diff. */
+/** Cor do elemento: metadata.color (#rrggbb, clareada p/ não dominar) → paleta → status de diff. */
 function baseColor(el: GeometryElement, status?: DiffStatus): number {
   if (status && status !== "unchanged") return STATUS_COLORS[status];
   const c = el.metadata?.["color"];
   if (typeof c === "string") {
     const m = c.match(/^#([0-9a-f]{6})$/i);
-    if (m) return parseInt(m[1], 16);
+    if (m) return lighten(parseInt(m[1], 16));
   }
   if (elLed(el)) return PANEL;
   return BASE_COLORS[el.geometry.type] ?? STEEL;
@@ -135,16 +248,21 @@ export function buildProjectGroup(
     byId.get(id)!.push(obj);
   };
 
+  // material de volume: claro, fosco e flat — mudanças de plano ficam visíveis
   const mkSteel = (color: number, status?: DiffStatus, opacity = 1) =>
     new THREE.MeshStandardMaterial({
       color,
-      metalness: 0.55,
-      roughness: 0.5,
+      metalness: 0.06,
+      roughness: 0.9,
+      flatShading: true,
       transparent: opacity < 1 || (status !== undefined && status !== "unchanged"),
       opacity: status === "added" || status === "removed" ? 0.55 : status === "modified" ? 0.8 : opacity,
       emissive: status && status !== "unchanged" ? STATUS_COLORS[status] : 0x000000,
       emissiveIntensity: status && status !== "unchanged" ? 0.18 : 0,
       side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
     });
 
   const bbox = new THREE.Box3();
@@ -174,6 +292,8 @@ export function buildProjectGroup(
             : orientedMesh(a, b, (len) => new THREE.BoxGeometry(w, h, len), new THREE.Vector3(0, 0, 1));
         mesh.material = mkSteel(color, status);
         addMesh(el, mesh);
+        addSilhouette(mesh, mesh.geometry);
+        addTechLines(mesh, mesh.geometry, { featureThreshold: g.section.type === "round" ? 30 : 1 });
         break;
       }
       case "cylinder": {
@@ -185,6 +305,8 @@ export function buildProjectGroup(
         );
         mesh.material = mkSteel(color, status);
         addMesh(el, mesh);
+        addSilhouette(mesh, mesh.geometry);
+        addTechLines(mesh, mesh.geometry, { featureThreshold: 30 });
         break;
       }
       case "line": {
@@ -207,6 +329,7 @@ export function buildProjectGroup(
         for (let i = 1; i < pts.length; i++) {
           const seg = orientedMesh(pts[i - 1], pts[i], (len) => new THREE.CylinderGeometry(t / 2, t / 2, len, 8), new THREE.Vector3(0, 1, 0));
           seg.material = mkSteel(color, status);
+          addSilhouette(seg, seg.geometry);
           polylineGroup.add(seg);
         }
         polylineGroup.userData.elementId = el.id;
@@ -247,6 +370,7 @@ export function buildProjectGroup(
           mesh.add(edges);
           register(el.id, edges);
           addMesh(el, mesh);
+          addSilhouette(mesh, geo);
         } else {
           const mesh = new THREE.Mesh(new THREE.BoxGeometry(sx, sz, sy), mkSteel(color, status));
           mesh.position.copy(v3(g.center));
@@ -255,6 +379,9 @@ export function buildProjectGroup(
             mesh.rotation.set(rx, rz, ry);
           }
           addMesh(el, mesh);
+          // caixa: silhueta forte + 12 arestas visíveis + as mesmas em tracejado (hidden) — leitura "enxergando através"
+          addSilhouette(mesh, mesh.geometry);
+          addTechLines(mesh, mesh.geometry, { featureThreshold: 1, hidden: true });
         }
         break;
       }
@@ -290,6 +417,7 @@ export function buildProjectGroup(
           for (let i = 1; i < pts.length; i++) {
             const seg = orientedMesh(pts[i - 1], pts[i], (len) => new THREE.CylinderGeometry(t / 2, t / 2, len, 8), new THREE.Vector3(0, 1, 0));
             seg.material = mkSteel(color, status);
+            addSilhouette(seg, seg.geometry);
             arcGroup.add(seg);
           }
           arcGroup.userData.elementId = el.id;
@@ -311,6 +439,9 @@ export function buildProjectGroup(
         geometry.computeVertexNormals();
         const mesh = new THREE.Mesh(geometry, mkSteel(color, status, 0.85));
         addMesh(el, mesh);
+        // superfície plana: contorno forte + vincos sutis + triangulação interna + ocultas tracejadas
+        addSilhouette(mesh, geometry);
+        addTechLines(mesh, geometry, { featureThreshold: 18, innerWireframe: true, hidden: true });
         break;
       }
       case "mesh": {
@@ -329,6 +460,9 @@ export function buildProjectGroup(
         geometry.computeVertexNormals();
         const mesh = new THREE.Mesh(geometry, mkSteel(color, status, 0.9));
         addMesh(el, mesh);
+        // malha livre: silhueta + dobras reais + triangulação leve + ocultas tracejadas
+        addSilhouette(mesh, geometry);
+        addTechLines(mesh, geometry, { featureThreshold: 18, innerWireframe: true, hidden: true });
         break;
       }
       case "text": {
@@ -339,14 +473,13 @@ export function buildProjectGroup(
         break;
       }
       case "dimension": {
-        const diag = 1000;
-        const dimGroup = dimLine(
-          v3(g.start),
-          v3(g.end),
-          g.text ?? `${Math.round(v3(g.start).distanceTo(v3(g.end)))} mm`,
-          Math.max(diag * 0.03, 30),
-          new THREE.Vector3(0, 0, 60),
-        );
+        const A = v3(g.start);
+        const B = v3(g.end);
+        const len = A.distanceTo(B);
+        // cota proporcional e PERTO do trecho medido — ancorada na geometria
+        const labelH = Math.min(Math.max(len * 0.06, 25), 260);
+        const off = Math.min(Math.max(len * 0.05, 25), 220);
+        const dimGroup = dimLine(A, B, g.text ?? `${Math.round(len)} mm`, labelH, new THREE.Vector3(0, 0, off));
         dimGroup.userData.elementId = el.id;
         addMesh(el, dimGroup);
         break;
@@ -415,41 +548,47 @@ function fmtDim(mm: number): string {
 function dimLine(a: THREE.Vector3, b: THREE.Vector3, text: string, labelH: number, labelOffset: THREE.Vector3): THREE.Group {
   const g = new THREE.Group();
   const dir = new THREE.Vector3().subVectors(b, a).normalize();
-  const lineMat = new THREE.LineBasicMaterial({ color: DIM_COLOR });
+  const lineMat = new THREE.LineBasicMaterial({ color: DIM_COLOR, transparent: true, opacity: 0.75 });
   const accentMat = new THREE.LineBasicMaterial({ color: DIM_ACCENT });
 
-  // linha principal
-  g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), accentMat));
+  // COTA ANCORADA: linha de cota PARALELA deslocada da geometria, com linhas de
+  // extensão ligando os pontos medidos até a cota (padrão de desenho técnico).
+  const a2 = a.clone().add(labelOffset);
+  const b2 = b.clone().add(labelOffset);
 
-  // setas (cones) nas duas pontas
-  const arrowLen = labelH * 0.5;
-  const arrowGeo = new THREE.ConeGeometry(arrowLen * 0.35, arrowLen, 10);
-  for (const [tip, back] of [[b, a], [a, b]] as const) {
-    const cone = new THREE.Mesh(arrowGeo, new THREE.MeshBasicMaterial({ color: DIM_ACCENT }));
-    cone.position.copy(tip).sub(dir.clone().multiplyScalar(arrowLen * 0.5));
-    cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone());
-    g.add(cone);
+  // linhas de extensão: do ponto medido até um pouco além da linha de cota
+  const over = labelOffset.clone().multiplyScalar(1.22);
+  for (const p of [a, b]) {
+    g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([p, p.clone().add(over)]), lineMat));
   }
 
-  // extensões + ticks nas pontas
-  const extDir = labelOffset.clone().normalize();
+  // ticks nos pontos medidos (ancoragem visual na geometria)
   for (const p of [a, b]) {
-    g.add(new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints([p, p.clone().add(labelOffset)]),
-      lineMat,
-    ));
     const tick = new THREE.Mesh(
-      new THREE.SphereGeometry(labelH * 0.06, 8, 8),
-      new THREE.MeshBasicMaterial({ color: DIM_COLOR }),
+      new THREE.SphereGeometry(labelH * 0.07, 8, 8),
+      new THREE.MeshBasicMaterial({ color: DIM_ACCENT }),
     );
     tick.position.copy(p);
     g.add(tick);
-    void extDir;
   }
 
-  // rótulo
+  // linha de cota deslocada
+  g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([a2, b2]), accentMat));
+
+  // setas (cones) nas pontas da linha deslocada
+  const arrowLen = labelH * 0.45;
+  const arrowGeo = new THREE.ConeGeometry(arrowLen * 0.35, arrowLen, 10);
+  for (const [tip, from] of [[a2, b2], [b2, a2]] as const) {
+    const cone = new THREE.Mesh(arrowGeo, new THREE.MeshBasicMaterial({ color: DIM_ACCENT }));
+    const d = new THREE.Vector3().subVectors(tip, from).normalize();
+    cone.position.copy(tip).sub(d.clone().multiplyScalar(arrowLen * 0.5));
+    cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d);
+    g.add(cone);
+  }
+
+  // rótulo acima do meio da linha de cota deslocada
   const label = labelSprite(text, labelH);
-  label.position.copy(a).add(b).multiplyScalar(0.5).add(labelOffset.clone().multiplyScalar(0.65)).add(new THREE.Vector3(0, labelH * 0.55, 0));
+  label.position.copy(a2).add(b2).multiplyScalar(0.5).add(new THREE.Vector3(0, labelH * 0.6, 0));
   g.add(label);
   return g;
 }
@@ -464,8 +603,8 @@ export function buildDimensionGroup(bbox: THREE.Box3): THREE.Group | null {
   const min = bbox.min.clone();
   const max = bbox.max.clone();
   const diag = size.length();
-  const off = diag * 0.07;
-  const labelH = Math.max(diag * 0.035, 40);
+  const off = diag * 0.045;
+  const labelH = Math.max(diag * 0.03, 40);
   const g = new THREE.Group();
   g.name = "dimensions";
 
@@ -476,8 +615,8 @@ export function buildDimensionGroup(bbox: THREE.Box3): THREE.Group | null {
     new THREE.Vector3(max.x, min.y, zFront),
     `L ${fmtDim(size.x)}`,
     labelH,
-    new THREE.Vector3(0, 0, off * 0.55),
-  ));
+    new THREE.Vector3(0, 0, off * 0.38),
+   ));
 
   // ALTURA Y (Z do modelo) — no canto esquerdo (x = min.x - off, z = min.z)
   const xLeft = min.x - off;
@@ -486,8 +625,8 @@ export function buildDimensionGroup(bbox: THREE.Box3): THREE.Group | null {
     new THREE.Vector3(xLeft, max.y, min.z),
     `H ${fmtDim(size.y)}`,
     labelH,
-    new THREE.Vector3(-off * 0.55, 0, 0),
-  ));
+    new THREE.Vector3(-off * 0.38, 0, 0),
+   ));
 
   // PROFUNDIDADE Z (Y do modelo) — no solo, lado direito (x = max.x + off)
   const xRight = max.x + off;
@@ -496,8 +635,8 @@ export function buildDimensionGroup(bbox: THREE.Box3): THREE.Group | null {
     new THREE.Vector3(xRight, min.y, max.z),
     `P ${fmtDim(size.z)}`,
     labelH,
-    new THREE.Vector3(off * 0.55, 0, 0),
-  ));
+    new THREE.Vector3(off * 0.38, 0, 0),
+   ));
 
   return g;
 }

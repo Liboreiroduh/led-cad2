@@ -189,6 +189,16 @@ export const api = {
     const blob = await res.blob();
     triggerDownload(blob, filenameFromDisposition(res.headers.get("content-disposition")) ?? "led-cad.pdf");
   },
+  /** demo HTML standalone (3D interativo + visões) pronta para o cliente */
+  async downloadStandaloneHtml(project?: unknown): Promise<void> {
+    const res = await fetch("/api/export/html", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project }) });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new ApiCallError(body?.error ?? { type: "http_error", message: `HTTP ${res.status}` }, res.status);
+    }
+    const blob = await res.blob();
+    triggerDownload(blob, filenameFromDisposition(res.headers.get("content-disposition")) ?? "ledcollor-cad-demo.html");
+  },
   /** relatório PDF de diferenças entre a revisão pedida e a atual */
   async downloadDiffPdf(revision: number): Promise<void> {
     const res = await fetch("/api/export/diff-pdf", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revision }) });

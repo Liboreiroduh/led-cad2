@@ -20,8 +20,10 @@ const TABS: Array<[DockTab, string, React.ReactNode]> = [
   ["presets", "Presets", <FileJson key="i" className="h-5 w-5" />],
 ];
 
-/** altura do painel expandido — deixa viewport enxergar o preview 3D acima */
-const SHEET_H = "46vh";
+/** altura do painel expandido — deixa viewport enxergar o preview 3D acima.
+ *  min(vh, dvh): usa a área visível real (dvh) quando há barra de URL dinâmica,
+ *  com fallback automático para vh em motores sem dvh. */
+const SHEET_H = "min(46vh, 46dvh)";
 
 interface MobileSheetProps {
   open: boolean;
@@ -35,7 +37,7 @@ interface MobileSheetProps {
 
 export function MobileSheet({ open, onOpenChange, tab, onTabChange, badge, children }: MobileSheetProps) {
   return (
-    <div className="lg:hidden shrink-0 flex flex-col" data-mobile-sheet>
+    <div className="lg:hidden flex-1 min-h-0 flex flex-col" data-mobile-sheet>
       {/* ---------- PAINEL DESLIZANTE ---------- */}
       <AnimatePresence initial={false}>
         {open && (
@@ -45,7 +47,7 @@ export function MobileSheet({ open, onOpenChange, tab, onTabChange, badge, child
             animate={{ height: SHEET_H, opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ type: "spring", stiffness: 420, damping: 40 }}
-            className="overflow-hidden bg-white shadow-[0_-10px_36px_rgba(2,6,23,0.35)]"
+            className="min-h-0 overflow-hidden bg-white shadow-[0_-10px_36px_rgba(2,6,23,0.35)]"
             role="region"
             aria-label="Painel do copiloto"
           >
@@ -58,7 +60,8 @@ export function MobileSheet({ open, onOpenChange, tab, onTabChange, badge, child
             >
               <span className="h-1.5 w-12 rounded-full bg-slate-300" aria-hidden />
             </button>
-            <div className="h-[calc(46vh-18px)] min-h-[220px] flex flex-col overflow-hidden">
+            {/* conteúdo flexível: quando a tela é baixa, o painel encolhe e ROLA — a barra de abas permanece visível */}
+            <div className="flex-1 min-h-0 flex flex-col overflow-y-auto">
               {children}
             </div>
           </motion.div>

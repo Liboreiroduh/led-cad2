@@ -55,3 +55,7 @@ server.log
 # LED JSON CAD local data (project store, ai keys, examples)
 /data/
 tool-results/
+
+# generated test artifacts (pdf/html exports used for local QA only)
+/download/*.pdf
+/download/demo-cliente.html

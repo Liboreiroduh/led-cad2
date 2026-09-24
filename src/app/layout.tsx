@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "LED JSON CAD — LED Collor",
+  title: "LED Collor CAD",
   description:
     "CAD de estruturas para painéis LED dirigido por JSON: a IA lê o ProjectDocument, devolve um novo documento completo e o sistema valida, calcula o diff e mostra o preview 3D antes de aplicar.",
   keywords: ["CAD", "LED panel", "JSON", "AI", "estruturas metálicas", "LED Collor"],
@@ -30,7 +30,8 @@ export default function RootLayout({
     <html lang="pt-BR" suppressHydrationWarning>
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}>
         {children}
-        <Toaster position="bottom-right" richColors />
+        {/* top-center: toasts não cobrem a barra de navegação inferior (principal nav no mobile) */}
+        <Toaster position="top-center" richColors />
       </body>
     </html>
   );

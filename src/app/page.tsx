@@ -14,7 +14,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   FilePlus2, Upload, Undo2, FileSpreadsheet, FileDown, PlugZap, Loader2, X, Lock, RefreshCw,
   Camera, Keyboard, Layers3, Ruler, Crosshair, GitCompare, MoveHorizontal, Weight, ChevronDown, ChevronUp, Columns2,
-  Pencil, Check,
+  Pencil, Check, Globe,
 } from "lucide-react";
 import { toast } from "sonner";
 import Viewer3D from "@/components/cad/Viewer3D";
@@ -84,6 +84,7 @@ export default function Home() {
   const [providerLabel, setProviderLabel] = useState("carregando…");
   const [activeVision, setActiveVision] = useState(true);
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [htmlBusy, setHtmlBusy] = useState(false);
   const importFileRef = useRef<HTMLInputElement>(null);
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
   const [isolatedGroup, setIsolatedGroup] = useState<string | null>(null);
@@ -362,7 +363,7 @@ export default function Home() {
       if (typeof Notification === "undefined") return;
       if (document.visibilityState === "visible") return;
       if (Notification.permission !== "granted") return;
-      new Notification("LED JSON CAD — IA respondeu", { body: body.slice(0, 140), tag: "led-cad-transform" });
+      new Notification("LED Collor CAD — IA respondeu", { body: body.slice(0, 140), tag: "led-cad-transform" });
     } catch {
       // Notification indisponível — ignora silenciosamente
     }
@@ -689,11 +690,22 @@ export default function Home() {
       setPdfBusy(true);
       try {
         await api.downloadPdf();
-        toast.success("PDF gerado");
+        toast.success("Prancha PDF gerada");
       } catch (e) {
         toast.error((e as ApiCallError).payload?.message ?? (e as Error).message);
       } finally {
         setPdfBusy(false);
+      }
+    },
+    exportHtml: async () => {
+      setHtmlBusy(true);
+      try {
+        await api.downloadStandaloneHtml();
+        toast.success("Demonstração HTML gerada");
+      } catch (e) {
+        toast.error((e as ApiCallError).payload?.message ?? (e as Error).message);
+      } finally {
+        setHtmlBusy(false);
       }
     },
   };
@@ -784,15 +796,16 @@ export default function Home() {
 
   return (
     <TooltipProvider>
-      <div className="h-screen flex flex-col bg-slate-100 text-slate-900">
+      {/* 100dvh quando suportado: evita cortar os menus inferiores em navegadores com barra de URL dinâmica (100vh > área visível) */}
+      <div className="h-screen supports-[height:100dvh]:h-[100dvh] flex flex-col overflow-hidden bg-slate-100 text-slate-900">
         {/* ---------- TOPBAR ---------- */}
         <header className="flex items-center gap-2 px-2 sm:px-4 h-14 bg-gradient-to-r from-[#141f2b] via-[#1b2836] to-[#223344] text-slate-100 shrink-0 border-b-4 border-orange-600 shadow-md overflow-x-clip" role="banner">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="h-8 w-8 rounded bg-orange-600 grid place-items-center font-black text-white text-sm shrink-0" aria-hidden>
-              LC
+            <div className="h-8 rounded bg-white grid place-items-center shrink-0 px-1.5 shadow-sm" aria-hidden>
+              <img src="/logo-ledcollor.png" alt="LED Collor" className="h-6 w-auto" />
             </div>
             <div className="leading-tight min-w-0">
-              <div className="font-bold text-sm tracking-wide truncate">LED JSON CAD</div>
+              <div className="font-bold text-sm tracking-wide truncate">LED Collor CAD</div>
               <div className="text-[10px] text-slate-400 truncate">documento JSON · mm · Z solo</div>
             </div>
           </div>
@@ -963,16 +976,24 @@ export default function Home() {
             <TopBtn icon={<FileSpreadsheet className="h-4 w-4" />} label="BOM" onClick={() => setBomOpen(true)} />
             <TopBtn
               icon={pdfBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
-              label="PDF"
+              label="PRANCHA"
+              title="Baixar prancha técnica em PDF — esboço geométrico cotado (forma + dimensões + encaixes)"
               onClick={() => void actions.exportPdf()}
               disabled={pdfBusy}
+            />
+            <TopBtn
+              icon={htmlBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+              label="HTML"
+              title="Baixar demonstração interativa em HTML — modelo 3D navegável + visões, pronta para o cliente"
+              onClick={() => void actions.exportHtml()}
+              disabled={htmlBusy}
             />
             <TopBtn icon={<PlugZap className="h-4 w-4" />} label="IA" onClick={() => setProviderModalOpen(true)} highlight />
           </div>
         </header>
 
         {/* ---------- MAIN ---------- */}
-        <main className="flex-1 flex flex-col lg:flex-row min-h-0" role="main">
+        <main className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-hidden" role="main">
           {/* VIEWPORT */}
           <section className="relative flex-1 min-h-[220px] lg:min-h-0 bg-slate-100" aria-label="Viewport 3D">
             {project ? (
@@ -1370,8 +1391,9 @@ export default function Home() {
             </div>
           </div>
 
-          {/* MOBILE: ações rápidas mapeadas à IA real do servidor + bottom sheet com o mesmo dock */}
-          <div className="lg:hidden shrink-0 flex flex-col">
+          {/* MOBILE: ações rápidas mapeadas à IA real do servidor + bottom sheet com o mesmo dock.
+              Sem shrink-0: em telas baixas o painel encolhe (conteúdo rola) e a barra de abas NUNCA sai da tela. */}
+          <div className="lg:hidden min-h-0 flex flex-col">
             <MobileAiBar
               busy={sending}
               providerLabel={providerLabel}
@@ -1396,7 +1418,7 @@ export default function Home() {
         {/* ---------- FOOTER (status) ---------- */}
         <footer className="h-7 shrink-0 bg-[#141f2b] text-slate-400 text-[11px] flex items-center gap-3 px-3 overflow-hidden" role="contentinfo">
           <span className="text-orange-500 font-semibold shrink-0">LED Collor</span>
-          <span className="hidden sm:inline truncate">JSON do projeto é a fonte de verdade · canvas é visualização · PDF/BOM derivados</span>
+          <span className="hidden sm:inline truncate">JSON do projeto é a fonte de verdade · canvas é visualização · prancha geométrica/BOM derivados</span>
           <span className="ml-auto flex items-center gap-2 shrink-0">
             {candidate && <span className="text-orange-400 font-semibold">PREVIEW ATIVO</span>}
             {remoteChange && <span className="text-amber-300 font-semibold cad-pulse-soft" role="status">outro operador · rev {remoteChange.revision}</span>}

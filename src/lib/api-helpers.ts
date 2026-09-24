@@ -43,10 +43,23 @@ export function handleError(e: unknown): NextResponse {
   return fail(500, "internal_error", (e as Error)?.message ?? "erro interno inesperado", { retryable: false });
 }
 
+/** Teto de corpo JSON — cola gigantes no editor/import/IA não podem estourar a memória do servidor. */
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
+
 export async function readJsonBody<T>(req: Request): Promise<T> {
   try {
-    return (await req.json()) as T;
-  } catch {
-    throw new Error("corpo da requisição não é JSON válido");
+    const declared = Number(req.headers.get("content-length") ?? "0");
+    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+      throw new Error(`corpo da requisição muito grande (${(declared / 1048576).toFixed(1)} MB) — limite 8 MB`);
+    }
+    const text = await req.text();
+    if (text.length > MAX_BODY_BYTES) {
+      throw new Error(`corpo da requisição muito grande (${(text.length / 1048576).toFixed(1)} MB) — limite 8 MB`);
+    }
+    return JSON.parse(text) as T;
+  } catch (e) {
+    const msg = (e as Error)?.message ?? "";
+    if (msg.includes("muito grande")) throw e;
+    throw new Error("corpo da requisição não é JSON válido — confira o documento colado");
   }
 }

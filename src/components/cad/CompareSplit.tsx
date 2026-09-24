@@ -309,7 +309,7 @@ async function exportCompositeImage(
 
     ctx.fillStyle = "#ffffff";
     ctx.font = "700 26px system-ui, sans-serif";
-    ctx.fillText("COMPARAÇÃO A/B — LED JSON CAD", MARGIN, 38);
+    ctx.fillText("COMPARAÇÃO A/B — LED Collor CAD", MARGIN, 38);
     ctx.fillStyle = "#94a3b8";
     ctx.font = "500 17px system-ui, sans-serif";
     ctx.fillText(

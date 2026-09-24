@@ -1,17 +1,20 @@
 /**
  * RELATÓRIO PDF DE DIFERENÇAS — compara duas revisões do ProjectDocument.
- * Uma folha A2 landscape: vistas frontais A/B coloridas por status de diff,
- * resumo numérico, listas de IDs alterados e pesos estimados.
+ * Uma folha A2 landscape: vistas frontais A/B coloridas por status de diff
+ * (base cinza claro, mudanças em verde/laranja/vermelho), resumo numérico e
+ * listas de IDs alterados. Sem pesos/materiais — foco em forma e geometria.
  * Mesmo aviso obrigatório do exportador canônico (esboço de referência).
  */
-import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage, type PDFImage } from "pdf-lib";
 import type { ProjectDocument } from "@/lib/cad/schema";
 import { panelDimsOf } from "@/lib/cad/schema";
 import { diffProjects, describeDiff } from "@/lib/cad/diff";
-import { deriveBom } from "@/lib/cad/bom";
 import {
   A2, RED, INK, GRAY, LIGHT, ORANGE, NAVY, GREEN, PDF_RED,
-  project, drawView, sanitize, type RGB, type ViewBox,
+  sanitize, projectView, drawProjection,
+  type RGB, type ViewBox, type ProjEl,
 } from "./report";
 
 export interface DiffPdfInput {
@@ -24,7 +27,7 @@ export interface DiffPdfInput {
 function statusColorA(status: string | undefined): RGB | undefined {
   if (status === "removed") return PDF_RED;
   if (status === "modified") return ORANGE;
-  return undefined; // inalterado mantém cor padrão
+  return undefined; // inalterado mantém cinza claro
 }
 
 function statusColorB(status: string | undefined): RGB | undefined {
@@ -34,15 +37,12 @@ function statusColorB(status: string | undefined): RGB | undefined {
 }
 
 function drawHeader(page: PDFPage, bold: PDFFont, font: PDFFont, input: DiffPdfInput) {
-  page.drawRectangle({ x: 0, y: A2.h - 44, width: A2.w, height: 44, color: rgb(0.97, 0.9, 0.88) });
-  page.drawText(sanitize("ESBOÇO DE REFERÊNCIA GEOMÉTRICO — NÃO UTILIZAR PARA FABRICAÇÃO SEM REVISÃO TÉCNICA."), {
-    x: 24,
-    y: A2.h - 20,
-    size: 10,
-    font: bold,
-    color: RED,
-  });
-  page.drawText("LED JSON CAD · RELATÓRIO DE DIFERENÇAS", { x: 24, y: A2.h - 36, size: 9, font, color: GRAY });
+  page.drawRectangle({ x: 0, y: A2.h - 44, width: A2.w, height: 44, color: rgb(0.985, 0.965, 0.955) });
+  page.drawText(
+    sanitize("ESBOÇO GEOMÉTRICO — NÃO DEFINE MATERIAL OU FABRICAÇÃO · RESPONSABILIDADE ESTRUTURAL DE PROFISSIONAL HABILITADO."),
+    { x: 24, y: A2.h - 20, size: 10, font: bold, color: RED },
+  );
+  page.drawText("LED Collor CAD · RELATÓRIO DE DIFERENÇAS", { x: 24, y: A2.h - 36, size: 9, font, color: GRAY });
   page.drawText(
     sanitize(`REV ${String(input.otherRev).padStart(3, "0")} → ATUAL REV ${String(input.currentRev).padStart(3, "0")}`),
     { x: A2.w - 300, y: A2.h - 28, size: 13, font: bold, color: NAVY },
@@ -59,8 +59,6 @@ function drawSummaryTable(
   bold: PDFFont,
 ): void {
   const { currentDoc, otherDoc, currentRev, otherRev } = input;
-  const wA = deriveBom(currentDoc).total_weight_kg;
-  const wB = deriveBom(otherDoc).total_weight_kg;
   const pd = (d: ProjectDocument) => {
     const p = panelDimsOf(d);
     return p ? `${p.width}×${p.height}` : "—";
@@ -69,15 +67,14 @@ function drawSummaryTable(
     ["REVISÃO", `REV ${otherRev} (comparada)`, `REV ${currentRev} (atual)`],
     ["PAINEL", pd(otherDoc), pd(currentDoc)],
     ["ELEMENTOS", String(otherDoc.elements.length), String(currentDoc.elements.length)],
-    ["PESO ESTIMADO", `${wB.toFixed(1)} kg`, `${wA.toFixed(1)} kg`],
-    ["DIF. PESO", `${(wA - wB >= 0 ? "+" : "") + (wA - wB).toFixed(1)} kg`, ""],
+    ["ALTERAÇÕES", `+${diff.added.length}  ~${diff.modified.length}  -${diff.removed.length}`, ""],
   ];
-  page.drawText(sanitize("RESUMO"), { x, y: yTop + 18, size: 12, font: bold, color: NAVY });
-  const colW = [110, 150, 150];
+  page.drawText(sanitize("RESUMO GEOMÉTRICO"), { x, y: yTop + 18, size: 12, font: bold, color: NAVY });
+  const colW = [110, 170, 150];
   let ry = yTop;
   for (const [k, vb, va] of rows) {
     page.drawText(sanitize(k), { x, y: ry, size: 9, font: bold, color: GRAY });
-    page.drawText(sanitize(vb).slice(0, 20), { x: x + colW[0], y: ry, size: 9.5, font, color: va === "" ? ORANGE : INK });
+    page.drawText(sanitize(vb).slice(0, 24), { x: x + colW[0], y: ry, size: 9.5, font, color: va === "" ? ORANGE : INK });
     page.drawText(sanitize(va).slice(0, 20), { x: x + colW[0] + colW[1], y: ry, size: 9.5, font, color: INK });
     ry -= 16;
   }
@@ -120,19 +117,28 @@ function drawIdList(
   }
 }
 
-function drawFooter(page: PDFPage, input: DiffPdfInput, font: PDFFont, bold: PDFFont) {
+function drawFooter(page: PDFPage, input: DiffPdfInput, font: PDFFont, bold: PDFFont, logo: PDFImage | null) {
   const w = 460;
   const h = 92;
   const x = A2.w - w - 24;
   const y = 24;
   page.drawRectangle({ x, y, width: w, height: h, borderColor: NAVY, borderWidth: 1.5, color: rgb(1, 1, 1) });
   page.drawRectangle({ x, y: y + h - 28, width: w, height: 28, color: NAVY });
-  page.drawText("LED COLLOR", { x: x + 12, y: y + h - 20, size: 15, font: bold, color: rgb(1, 1, 1) });
-  page.drawText(sanitize("RELATÓRIO DE DIFERENÇAS ENTRE REVISÕES"), { x: x + 130, y: y + h - 18, size: 9, font, color: rgb(0.85, 0.87, 0.9) });
+  let subtitleX = x + 130;
+  if (logo) {
+    const lh = 18;
+    const lw = lh * (logo.width / logo.height);
+    page.drawRectangle({ x: x + 8, y: y + h - 25, width: lw + 10, height: 22, color: rgb(1, 1, 1) });
+    page.drawImage(logo, { x: x + 13, y: y + h - 23, width: lw, height: lh });
+    subtitleX = x + 13 + lw + 14;
+  } else {
+    page.drawText("LED COLLOR", { x: x + 12, y: y + h - 20, size: 15, font: bold, color: rgb(1, 1, 1) });
+  }
+  page.drawText(sanitize("RELATÓRIO DE DIFERENÇAS ENTRE REVISÕES"), { x: subtitleX, y: y + h - 18, size: 9, font, color: rgb(0.85, 0.87, 0.9) });
   const rows: Array<[string, string]> = [
     ["PROJETO", sanitize(input.currentDoc.project.name).slice(0, 52)],
     ["COMPARAÇÃO", `REV ${String(input.otherRev).padStart(3, "0")} → REV ${String(input.currentRev).padStart(3, "0")} · ${new Date().toLocaleString("pt-BR")}`],
-    ["UNIDADE", "mm · pesos estimados derivados do ProjectDocument"],
+    ["UNIDADE", "mm · comparação puramente geométrica (forma e dimensões)"],
   ];
   let ry = y + h - 46;
   for (const [k, v] of rows) {
@@ -144,7 +150,7 @@ function drawFooter(page: PDFPage, input: DiffPdfInput, font: PDFFont, bold: PDF
     sanitize("AVISO: ESBOÇO DE REFERÊNCIA GEOMÉTRICO — NÃO UTILIZAR PARA FABRICAÇÃO SEM REVISÃO TÉCNICA."),
     { x: 24, y: 32, size: 8.5, font: bold, color: RED },
   );
-  page.drawText("LED JSON CAD · LED Collor", { x: 24, y: 18, size: 8, font, color: GRAY });
+  page.drawText("LED Collor CAD", { x: 24, y: 18, size: 8, font, color: GRAY });
 }
 
 export async function generateDiffPdf(input: DiffPdfInput): Promise<Uint8Array> {
@@ -159,6 +165,12 @@ export async function generateDiffPdf(input: DiffPdfInput): Promise<Uint8Array> 
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  let logo: PDFImage | null = null;
+  try {
+    logo = await pdf.embedPng(readFileSync(path.join(process.cwd(), "public", "logo-ledcollor.png")));
+  } catch {
+    logo = null;
+  }
   const page: PDFPage = pdf.addPage([A2.w, A2.h]);
   drawHeader(page, bold, font, input);
 
@@ -177,12 +189,17 @@ export async function generateDiffPdf(input: DiffPdfInput): Promise<Uint8Array> 
     statusB[el.id] = addedSet.has(el.id) ? "added" : modifiedSet.has(el.id) ? "modified" : "unchanged";
   }
 
-  const projA = project(currentDoc, "front", (el) => statusColorA(statusA[el.id]));
-  const projB = project(otherDoc, "front", (el) => statusColorB(statusB[el.id]));
-  const sA = { value: 1 };
-  const sB = { value: 1 };
-  drawView(page, projA.prims, projA.bbox, boxA, bold, `ATUAL · REV ${input.currentRev} (vermelho = sai na restauração)`, sA);
-  drawView(page, projB.prims, projB.bbox, boxB, bold, `REV ${input.otherRev} · COMPARADA (verde = entra na restauração)`, sB);
+  const projA = projectView(currentDoc, "front");
+  const projB = projectView(otherDoc, "front");
+  const byIdA = new Map<string, ProjEl>(projA.els.map((e) => [e.id, e]));
+  const byIdB = new Map<string, ProjEl>(projB.els.map((e) => [e.id, e]));
+
+  drawProjection(page, projA, boxA, bold, `ATUAL · REV ${input.currentRev} (vermelho = sai na restauração)`, {
+    colorFor: (el) => statusColorA(statusA[byIdA.get(el.id)?.id ?? el.id] ?? "unchanged"),
+  });
+  drawProjection(page, projB, boxB, bold, `REV ${input.otherRev} · COMPARADA (verde = entra na restauração)`, {
+    colorFor: (el) => statusColorB(statusB[byIdB.get(el.id)?.id ?? el.id] ?? "unchanged"),
+  });
 
   // ---------- resumo + listas ----------
   const listTop = viewTop - boxH - 40;
@@ -207,6 +224,6 @@ export async function generateDiffPdf(input: DiffPdfInput): Promise<Uint8Array> 
     );
   }
 
-  drawFooter(page, input, font, bold);
+  drawFooter(page, input, font, bold, logo);
   return pdf.save();
 }
