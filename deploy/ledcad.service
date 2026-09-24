@@ -1,0 +1,31 @@
+[Unit]
+Description=LED CAD - Gerador de Estrutura Metalica (Next.js)
+After=network.target
+
+[Service]
+Type=simple
+User=ledcad
+Group=ledcad
+WorkingDirectory=/opt/ledcad
+ExecStart=/home/ledcad/.bun/bin/bun run start
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=127.0.0.1
+Environment=DATABASE_URL=file:/opt/ledcad/db/custom.db
+# Opcional: chaves de IA (ou configure via UI, que grava em /opt/ledcad/data/ai_config.json)
+#Environment=ZAI_API_KEY=
+#Environment=GEMINI_API_KEY=
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ledcad
+
+# Hardening basico
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/ledcad
+
+[Install]
+WantedBy=multi-user.target
